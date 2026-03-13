@@ -32,7 +32,7 @@ LRESULT keyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                         QApplication::postEvent(Hooker::receiver, tabDownEvent); // async
                     }
                     return 1; // 阻止事件传递
-                } else if (pKeyBoard->vkCode == VK_OEM_3) { // ~`
+                } else if (pKeyBoard->scanCode == 0x29) { // key physically to the left of 1 (scan code 0x29), layout-agnostic
                     qDebug() << "Alt+` detected!";
                     auto shiftModifier = Util::isKeyPressed(VK_SHIFT) ? Qt::ShiftModifier : Qt::NoModifier;
                     auto event = new QKeyEvent(QEvent::KeyPress, Qt::Key_QuoteLeft, Qt::AltModifier | shiftModifier);
