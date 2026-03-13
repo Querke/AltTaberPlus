@@ -221,6 +221,18 @@ void Widget::notifyForegroundChanged(HWND hwnd, ForegroundChangeSource source) {
     // 通过`EVENT_SYSTEM_FOREGROUND`触发时忽略`IsWindowVisible`，因为窗口在创建瞬间可能不可见
     if (!Util::isWindowAcceptable(hwnd, source == WinEvent)) return;
     auto path = Util::getWindowProcessPath(hwnd); // TODO 比较耗时，最好仅在单次show期间缓存，同时避免hwnd复用造成缓存错误
+    if (path.isEmpty() && source == WinEvent) {
+        // UWP apps: CoreWindow may not exist yet during launch, retry after a short delay
+        QTimer::singleShot(500, this, [this, hwnd]() {
+            if (!IsWindow(hwnd)) return;
+            auto path = Util::getWindowProcessPath(hwnd);
+            if (path.isEmpty()) return;
+            winActiveOrder[path].insert(hwnd, QDateTime::currentDateTime());
+            qDebug() << "*ForeWin changed (WinEvent-Retry):"
+                    << Util::getWindowTitle(hwnd) << Util::getClassName(hwnd) << path;
+        });
+        return;
+    }
     // TODO 不能让winActiveOrder无限增长，需要定时清理
     winActiveOrder[path].insert(hwnd, QDateTime::currentDateTime());
 

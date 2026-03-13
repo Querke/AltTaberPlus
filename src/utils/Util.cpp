@@ -216,16 +216,27 @@ namespace Util {
             // ref: https://stackoverflow.com/questions/53706056/how-to-activate-window-started-by-another-process
             // ref: [Foreground activation permission is like love: You can’t steal it, it has to be given to you]
             //      https://devblogs.microsoft.com/oldnewthing/20090220-00/?p=19083
-            // 还有一种比较常见的方法是：AttachThreadInput
-            // 另一个技巧是： AllocConsole ?
             // ref: https://github.com/sigoden/window-switcher/blob/0c99b27823b4e6abd21e73f505a7c2cd8c21f59b/src/utils/window.rs#L122
 
-            // Hack: 这里我们模拟一个空的键盘输入即可，目的是让本进程成为“最近产生输入的进程”，以获取设置前台窗口的权限
+            // Hack 1: 模拟一个空的键盘输入，目的是让本进程成为”最近产生输入的进程”，以获取设置前台窗口的权限
             // ref: https://github.com/stianhoiland/cmdtab/blob/d33730f52af40f46545b086953158a5382f2a05b/src/cmdtab.c#L488
             // ref: https://github.com/microsoft/PowerToys/blob/7d0304fd06939d9f552e75be9c830db22f8ff9e2/src/modules/fancyzones/FancyZonesLib/util.cpp#L376
             INPUT input = {.type = INPUT_KEYBOARD};
             SendInput(1, &input, sizeof(INPUT));
+
+            // Hack 2: AttachThreadInput — 当进程以管理员身份通过任务计划程序启动时，SendInput不足以获取前台窗口权限。
+            // 通过将本线程附加到当前前台窗口的线程，Windows视两者为共享输入队列，从而允许SetForegroundWindow成功。
+            // 这解决了以管理员身份运行时Alt+`切换同应用窗口失败的问题。
+            HWND curForeWnd = GetForegroundWindow();
+            DWORD curThread = GetCurrentThreadId();
+            DWORD foreThread = GetWindowThreadProcessId(curForeWnd, nullptr);
+            bool attached = foreThread && foreThread != curThread
+                            && AttachThreadInput(curThread, foreThread, TRUE);
+
             SetForegroundWindow(hwnd);
+
+            if (attached)
+                AttachThreadInput(curThread, foreThread, FALSE);
         } else {
             // 如果本进程has前台窗口，则可以随意调用该函数转移焦点
             SetForegroundWindow(hwnd);
@@ -272,7 +283,7 @@ namespace Util {
         QString className;
 
         if ((skipVisibleCheck || IsWindowVisible(hwnd))
-            && !isWindowCloaked(hwnd)
+            && (skipVisibleCheck || !isWindowCloaked(hwnd)) // 窗口创建瞬间可能处于cloaked状态
             // 窗口显示在任务栏的基本规则：https://devblogs.microsoft.com/oldnewthing/20031229-00/?p=41283
             && (!GetWindow(hwnd, GW_OWNER) || exStyle & WS_EX_APPWINDOW) // OmApSvcBroker, QQ主面板（意料之外）; 保留：系统属性（Path）
             && (exStyle & WS_EX_TOOLWINDOW) == 0 // 非工具窗口，但其实有些工具窗口没有这个这个属性

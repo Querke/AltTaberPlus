@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
-set(CMAKE_PREFIX_PATH "D:/Qt/6.8.1/msvc2022_64/lib/cmake")
+set(CMAKE_PREFIX_PATH "C:/Qt/6.8.1/msvc2022_64/lib/cmake")
 list(APPEND CMAKE_AUTOUIC_SEARCH_PATHS ui) # 如果.ui文件不在.cpp同一目录下，需要添加搜索路径
 
 # 设置版本信息变量
@@ -83,6 +83,7 @@ target_link_libraries(Win_Switcher
 
 target_link_libraries(${PROJECT_NAME}
         Dwmapi
+        runtimeobject
 )
 
 # 启用`gui_private`模块
