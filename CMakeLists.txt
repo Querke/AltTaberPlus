@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.29)
+cmake_minimum_required(VERSION 3.29)
 project(Win_Switcher)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -91,9 +91,10 @@ target_link_libraries(${PROJECT_NAME}
 target_include_directories(${PROJECT_NAME} PRIVATE ${Qt6Gui_PRIVATE_INCLUDE_DIRS})
 
 set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "AltTaber") # 设置输出文件名
-if (CMAKE_BUILD_TYPE MATCHES "Release")
-    set_target_properties(${PROJECT_NAME} PROPERTIES WIN32_EXECUTABLE true) # 设置为窗口应用程序, 无控制台，同时会导致Clion无法捕获输出
-endif ()
+
+# For MSVC multi-config generators, CMAKE_BUILD_TYPE is usually empty at configure time.
+# Tell CMake to hide the console specifically when building Release config.
+set_target_properties(${PROJECT_NAME} PROPERTIES WIN32_EXECUTABLE $<CONFIG:Release>)
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
         QT_DEPRECATED_WARNINGS

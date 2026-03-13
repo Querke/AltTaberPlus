@@ -1,4 +1,4 @@
-﻿#include "../header/widget.h"
+#include "../header/widget.h"
 #include "ui_Widget.h"
 #include "utils/Util.h"
 #include <QDebug>
@@ -15,6 +15,50 @@
 #include <QMetaEnum>
 #include "utils/SystemTray.h"
 #include "utils/ConfigManager.h"
+#include <QVBoxLayout>
+
+class WindowListPopup : public QWidget {
+public:
+    QListWidget* lw;
+    WindowListPopup(QWidget* parent) : QWidget(parent, Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint) {
+        setAttribute(Qt::WA_TranslucentBackground);
+        lw = new QListWidget(this);
+        lw->setStyleSheet(R"(
+            QListWidget {
+                background-color: transparent;
+                border: none;
+                outline: none;
+                color: rgb(240, 240, 240);
+                font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Consolas";
+            }
+            QListWidget::item {
+                padding: 6px 10px;
+                border-radius: 4px;
+            }
+            QListWidget::item:selected {
+                background-color: rgba(255, 255, 255, 40);
+            }
+        )");
+        lw->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        lw->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        lw->setAutoScroll(false); // Prevent the ListWidget from trying to scroll to "make item visible"
+        auto layout = new QVBoxLayout(this);
+        layout->addWidget(lw);
+        layout->setContentsMargins(8, 8, 8, 8);
+    }
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(25, 25, 25, 100));
+        painter.drawRect(rect());
+    }
+    void showEvent(QShowEvent* e) override {
+        QWidget::showEvent(e);
+        Util::setWindowRoundCorner((HWND)winId());
+        setWindowBlur((HWND)winId());
+    }
+};
 
 Widget::Widget(QWidget* parent) : QWidget(parent), ui(new Ui::Widget) {
     ui->setupUi(this);
@@ -27,6 +71,9 @@ Widget::Widget(QWidget* parent) : QWidget(parent), ui(new Ui::Widget) {
 
     Util::setWindowRoundCorner(this->hWnd()); // 设置窗口圆角
     setWindowBlur(hWnd()); // 设置窗口模糊, 必须配合Qt::WA_TranslucentBackground
+
+    popup = new WindowListPopup(this);
+    popup->hide();
 
     setupLabelFont();
 
@@ -55,6 +102,7 @@ Widget::Widget(QWidget* parent) : QWidget(parent), ui(new Ui::Widget) {
     lw->installEventFilter(this);
 
     connect(lw, &QListWidget::currentItemChanged, this, [this](QListWidgetItem* cur, QListWidgetItem*) {
+        groupWindowOrder.clear(); // Ensure we cycle the correct app when changing apps
         if (cur) showLabelForItem(cur);
     });
 
@@ -71,6 +119,7 @@ Widget::Widget(QWidget* parent) : QWidget(parent), ui(new Ui::Widget) {
 
 Widget::~Widget() {
     delete ui;
+    if (popup) popup->deleteLater();
 }
 
 void Widget::keyPressEvent(QKeyEvent* event) {
@@ -89,13 +138,33 @@ void Widget::keyPressEvent(QKeyEvent* event) {
         auto index = (i - (2 * isShiftPressed - 1) + lw->count()) % lw->count();
         lw->setCurrentRow(index);
     } else if (key == Qt::Key_QuoteLeft && (modifiers & Qt::AltModifier)) { // Alt + `, 在前台窗口同组窗口内切换
+        auto foreWin = GetForegroundWindow();
         if (this->isVisible() && !this->isMinimized()) {
-            // isVisible() == true if minimized
-            // 不使用`isForeground()`，即使`bringWindowToTop`(without active)，少数窗口也可能抢夺焦点，如`CAJViewer`
-            hide();
+            if (auto item = lw->currentItem()) {
+                auto windowGroup = item->data(Qt::UserRole).value<WindowGroup>();
+                if (groupWindowOrder.isEmpty())
+                    groupWindowOrder = buildGroupWindowOrder(windowGroup.exePath);
+                
+                HWND currentHwnd = nullptr;
+                if (popup && popup->isVisible() && popup->lw->currentItem()) {
+                    currentHwnd = reinterpret_cast<HWND>(popup->lw->currentItem()->data(Qt::UserRole).value<void*>());
+                }
+                
+                HWND nextHwnd = nullptr;
+                if (currentHwnd && groupWindowOrder.contains(currentHwnd)) {
+                    nextHwnd = rotateWindowInGroup(groupWindowOrder, currentHwnd, !(modifiers & Qt::ShiftModifier));
+                } else {
+                    nextHwnd = groupWindowOrder.value(1, groupWindowOrder.value(0)); // skip foreWin if possible
+                }
+                
+                if (nextHwnd) {
+                    Util::bringWindowToTop(nextHwnd, this->hWnd());
+                    showLabelForItem(item, Util::getWindowTitle(nextHwnd));
+                }
+            }
             return;
         }
-        auto foreWin = GetForegroundWindow();
+        
         if (groupWindowOrder.isEmpty()) {
             auto targetExe = Util::getWindowProcessPath(foreWin);
             groupWindowOrder = buildGroupWindowOrder(targetExe);
@@ -103,6 +172,8 @@ void Widget::keyPressEvent(QKeyEvent* event) {
         if (auto nextWin = rotateWindowInGroup(groupWindowOrder, foreWin, !(modifiers & Qt::ShiftModifier))) {
             Util::switchToWindow(nextWin, true);
             qInfo() << "(Alt+`)Switch to" << Util::getWindowTitle(nextWin) << Util::getClassName(nextWin);
+            
+            this->requestShowForCurrentApp();
         }
     } else if (key == Qt::Key_Up || key == Qt::Key_Down) {
         if (auto item = lw->currentItem()) {
@@ -138,6 +209,8 @@ bool Widget::forceShow() {
 void Widget::showLabelForItem(QListWidgetItem* item, QString text) {
     if (!item) return;
 
+    bool isWindowRotation = !text.isNull();
+
     if (text.isNull()) {
         auto path = item->data(Qt::UserRole).value<WindowGroup>().exePath;
         text = Util::getFileDescription(path);
@@ -156,6 +229,78 @@ void Widget::showLabelForItem(QListWidgetItem* item, QString text) {
     labelRect.moveLeft(qMax(labelRect.left(), bound.left())); // left align
 
     ui->label->move(labelRect.topLeft());
+
+    // Update the window list popup
+    if (popup) {
+        auto group = item->data(Qt::UserRole).value<WindowGroup>();
+        if (group.windows.size() > 1) {
+            popup->lw->clear();
+            QFont font = ui->label->font();
+            popup->lw->setFont(font);
+
+            int maxWidth = 200; // minimum width
+            bool itemSelected = false;
+
+            for (const auto& win : group.windows) {
+                auto listText = Util::getWindowTitle(win.hwnd);
+                if (listText.isEmpty()) listText = win.className;
+                
+                auto winItem = new QListWidgetItem(listText);
+                winItem->setData(Qt::UserRole, QVariant::fromValue(reinterpret_cast<void*>(win.hwnd)));
+                popup->lw->addItem(winItem);
+                
+                QFontMetrics fm(font);
+                int textWidth = fm.horizontalAdvance(listText) + 32; // padding
+                maxWidth = qMax(maxWidth, textWidth);
+
+                // Check if this window is currently selected/active
+                if (isWindowRotation && Util::getWindowTitle(win.hwnd) == text) {
+                    popup->lw->setCurrentItem(winItem);
+                    itemSelected = true;
+                }
+            }
+            
+            if (!itemSelected && popup->lw->count() > 0) {
+                // Either not rotating or we didn't find a match. Select the target window.
+                HWND targetHwnd = group.windows.first().hwnd;
+                const auto lastActive = getLastActiveGroupWindow(group.exePath).first;
+                if (lastActive) {
+                    for (const auto& w : group.windows) {
+                        if (w.hwnd == lastActive) {
+                            targetHwnd = w.hwnd;
+                            break;
+                        }
+                    }
+                }
+                
+                for (int i = 0; i < popup->lw->count(); i++) {
+                    auto wItem = popup->lw->item(i);
+                    auto h = reinterpret_cast<HWND>(wItem->data(Qt::UserRole).value<void*>());
+                    if (h == targetHwnd) {
+                        popup->lw->setCurrentItem(wItem);
+                        break;
+                    }
+                }
+            }
+            
+            // Limit width
+            maxWidth = qMin(maxWidth, 800);
+            
+            // Calculate accurate height based on item size and margins
+            int itemHeight = 31; // slightly overestimating the height per item to prevent 1px scroll triggering
+            int calculatedHeight = (popup->lw->count() * itemHeight) + 18; // margins + tiny padding cushion
+            int popupHeight = qMin(calculatedHeight, 400); 
+            popup->resize(maxWidth, popupHeight);
+            
+            // Position popup below the Widget
+            QPoint globalPos = this->mapToGlobal(QPoint(this->width() / 2 - popup->width() / 2, this->height() + 10));
+            popup->move(globalPos);
+            popup->show();
+            popup->raise();
+        } else {
+            popup->hide();
+        }
+    }
 }
 
 void Widget::setupLabelFont() {
@@ -184,21 +329,28 @@ void Widget::keyReleaseEvent(QKeyEvent* event) {
             // active selected window
             if (auto item = lw->currentItem()) {
                 if (auto group = item->data(Qt::UserRole).value<WindowGroup>(); !group.windows.empty()) {
-                    WindowInfo targetWin = group.windows.at(0); // TODO 需要排序（lastActiveWindow 被关闭情况下）
-                    const auto lastActive = getLastActiveGroupWindow(group.exePath).first;
-                    for (auto& info: group.windows) {
-                        if (info.hwnd == lastActive) {
-                            targetWin = info;
-                            break;
+                    HWND targetHwnd = nullptr;
+                    if (popup && popup->isVisible() && popup->lw->currentItem()) {
+                        targetHwnd = reinterpret_cast<HWND>(popup->lw->currentItem()->data(Qt::UserRole).value<void*>());
+                    } else {
+                        WindowInfo targetWin = group.windows.at(0); // TODO 需要排序（lastActiveWindow 被关闭情况下）
+                        const auto lastActive = getLastActiveGroupWindow(group.exePath).first;
+                        for (auto& info: group.windows) {
+                            if (info.hwnd == lastActive) {
+                                targetWin = info;
+                                break;
+                            }
                         }
+                        targetHwnd = targetWin.hwnd;
                     }
-                    if (targetWin.hwnd) {
-                        Util::switchToWindow(targetWin.hwnd);
-                        qInfo() << "Switch to" << targetWin << group.exePath;
+                    if (targetHwnd) {
+                        Util::switchToWindow(targetHwnd);
+                        qInfo() << "Switch to" << targetHwnd << group.exePath;
                     }
                 }
             }
             hide(); //! must hide after active target window, or focus may fallback to prev foreground window (like 网易云音乐)
+            if (popup) popup->hide();
         }
     }
     QWidget::keyReleaseEvent(event);
@@ -275,7 +427,7 @@ QList<WindowGroup> Widget::prepareWindowGroupList() {
     return winGroupList;
 }
 
-bool Widget::prepareListWidget() {
+bool Widget::prepareListWidget(bool selectCurrentApp) {
     auto winGroupList = prepareWindowGroupList();
     lw->clear();
     for (auto& winGroup: winGroupList) {
@@ -352,7 +504,11 @@ bool Widget::prepareListWidget() {
         }
         // 如果第一个item是前台窗口，就选中第二个
         // 因为有些情况：选中桌面 并不会产生一个item
-        lw->setCurrentRow(isFirstItemForeground ? 1 : 0); //! 首次显示时，该行特别耗时：472ms
+        if (selectCurrentApp) {
+            lw->setCurrentRow(0);
+        } else {
+            lw->setCurrentRow(isFirstItemForeground ? 1 : 0); //! 首次显示时，该行特别耗时：472ms
+        }
     } else if (lw->count() == 1) {
         lw->setCurrentRow(0);
     }
@@ -361,7 +517,11 @@ bool Widget::prepareListWidget() {
 }
 
 bool Widget::requestShow() { // TODO 当前台是开始菜单（Win）时，会导致显示 但无法操控
-    return prepareListWidget() && forceShow();
+    return prepareListWidget(false) && forceShow();
+}
+
+bool Widget::requestShowForCurrentApp() {
+    return prepareListWidget(true) && forceShow();
 }
 
 /// Warning: the `HWND` not guarantee to be valid (may be closed)

@@ -1,12 +1,15 @@
-﻿#ifndef WIN_SWITCHER_WIDGET_H
+#ifndef WIN_SWITCHER_WIDGET_H
 #define WIN_SWITCHER_WIDGET_H
 
 #include <QWidget>
 #include <Windows.h>
 #include <QListWidget>
 #include <QDebug>
+#include <QVBoxLayout>
 
 struct WindowGroup;
+
+class WindowListPopup;
 
 struct WindowInfo {
     QString title;
@@ -62,8 +65,9 @@ public:
 public:
     explicit Widget(QWidget* parent = nullptr);
     QList<WindowGroup> prepareWindowGroupList();
-    bool prepareListWidget();
+    bool prepareListWidget(bool selectCurrentApp = false);
     Q_INVOKABLE bool requestShow();
+    bool requestShowForCurrentApp();
     void notifyForegroundChanged(HWND hwnd, ForegroundChangeSource source);
 
     HWND hWnd() { return (HWND) winId(); }
@@ -93,6 +97,7 @@ private:
     /// exePath -> (HWND, time)
     QHash<QString, QHash<HWND, QDateTime>> winActiveOrder;
     QList<HWND> groupWindowOrder; // for Alt+` 同组窗口切换
+    WindowListPopup* popup = nullptr;
 };
 
 
