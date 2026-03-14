@@ -102,7 +102,6 @@ Widget::Widget(QWidget* parent) : QWidget(parent), ui(new Ui::Widget) {
     lw->installEventFilter(this);
 
     connect(lw, &QListWidget::currentItemChanged, this, [this](QListWidgetItem* cur, QListWidgetItem*) {
-        groupWindowOrder.clear(); // Ensure we cycle the correct app when changing apps
         if (cur) showLabelForItem(cur);
     });
 
@@ -132,13 +131,13 @@ void Widget::keyPressEvent(QKeyEvent* event) {
         {Qt::Key_L, Qt::Key_Right}, // →
     };
     if (key == Qt::Key_Tab) { // switch to next or prev
+        groupWindowOrder.clear(); // Ensure we cycle the correct app when changing apps
         auto i = lw->currentRow();
         bool isShiftPressed = (modifiers & Qt::ShiftModifier);
         // weird formula, but works (hhh)
         auto index = (i - (2 * isShiftPressed - 1) + lw->count()) % lw->count();
         lw->setCurrentRow(index);
     } else if (key == Qt::Key_QuoteLeft && (modifiers & Qt::AltModifier)) { // Alt + `, 在前台窗口同组窗口内切换
-        auto foreWin = GetForegroundWindow();
         if (this->isVisible() && !this->isMinimized()) {
             if (auto item = lw->currentItem()) {
                 auto windowGroup = item->data(Qt::UserRole).value<WindowGroup>();
@@ -159,21 +158,30 @@ void Widget::keyPressEvent(QKeyEvent* event) {
                 
                 if (nextHwnd) {
                     Util::bringWindowToTop(nextHwnd, this->hWnd());
-                    showLabelForItem(item, Util::getWindowTitle(nextHwnd));
+                    showLabelForItem(item, Util::getWindowTitle(nextHwnd), nextHwnd);
                 }
             }
             return;
         }
         
+        auto foreWin = GetForegroundWindow();
         if (groupWindowOrder.isEmpty()) {
             auto targetExe = Util::getWindowProcessPath(foreWin);
             groupWindowOrder = buildGroupWindowOrder(targetExe);
         }
-        if (auto nextWin = rotateWindowInGroup(groupWindowOrder, foreWin, !(modifiers & Qt::ShiftModifier))) {
-            Util::switchToWindow(nextWin, true);
-            qInfo() << "(Alt+`)Switch to" << Util::getWindowTitle(nextWin) << Util::getClassName(nextWin);
-            
+        
+        HWND nextWin = rotateWindowInGroup(groupWindowOrder, foreWin, !(modifiers & Qt::ShiftModifier));
+        if (!nextWin) {
+            nextWin = groupWindowOrder.value(1, groupWindowOrder.value(0));
+        }
+        
+        if (nextWin) {
+            Util::bringWindowToTop(nextWin, this->hWnd());
             this->requestShowForCurrentApp();
+            
+            if (auto item = lw->currentItem()) {
+                showLabelForItem(item, Util::getWindowTitle(nextWin), nextWin);
+            }
         }
     } else if (key == Qt::Key_Up || key == Qt::Key_Down) {
         if (auto item = lw->currentItem()) {
@@ -185,6 +193,7 @@ void Widget::keyPressEvent(QKeyEvent* event) {
             QApplication::postEvent(lw, wheelEvent);
         }
     } else if (key == Qt::Key_Left || key == Qt::Key_Right) { // 默认情况下 左右键可以切换item 只需要处理边界循环即可
+        groupWindowOrder.clear(); // Ensure we cycle the correct app when changing apps
         const int N = lw->count();
         const int i = lw->currentRow();
         if (key == Qt::Key_Left && i == 0)
@@ -206,7 +215,7 @@ bool Widget::forceShow() {
 }
 
 /// show App description under the icon
-void Widget::showLabelForItem(QListWidgetItem* item, QString text) {
+void Widget::showLabelForItem(QListWidgetItem* item, QString text, HWND focusHwnd) {
     if (!item) return;
 
     bool isWindowRotation = !text.isNull();
@@ -241,12 +250,17 @@ void Widget::showLabelForItem(QListWidgetItem* item, QString text) {
             int maxWidth = 200; // minimum width
             bool itemSelected = false;
 
-            for (const auto& win : group.windows) {
-                auto listText = Util::getWindowTitle(win.hwnd);
-                if (listText.isEmpty()) listText = win.className;
+            if (groupWindowOrder.isEmpty()) {
+                groupWindowOrder = buildGroupWindowOrder(group.exePath);
+            }
+            
+            // Build the list items matching the verified groupWindowOrder order which correctly reflects valid active windows
+            for (const HWND& hwnd : groupWindowOrder) {
+                QString listText = Util::getWindowTitle(hwnd);
+                if (listText.isEmpty()) listText = Util::getClassName(hwnd);
                 
                 auto winItem = new QListWidgetItem(listText);
-                winItem->setData(Qt::UserRole, QVariant::fromValue(reinterpret_cast<void*>(win.hwnd)));
+                winItem->setData(Qt::UserRole, QVariant::fromValue(reinterpret_cast<void*>(hwnd)));
                 popup->lw->addItem(winItem);
                 
                 QFontMetrics fm(font);
@@ -254,7 +268,10 @@ void Widget::showLabelForItem(QListWidgetItem* item, QString text) {
                 maxWidth = qMax(maxWidth, textWidth);
 
                 // Check if this window is currently selected/active
-                if (isWindowRotation && Util::getWindowTitle(win.hwnd) == text) {
+                if (focusHwnd && hwnd == focusHwnd) {
+                    popup->lw->setCurrentItem(winItem);
+                    itemSelected = true;
+                } else if (!focusHwnd && isWindowRotation && listText == text) {
                     popup->lw->setCurrentItem(winItem);
                     itemSelected = true;
                 }
@@ -262,23 +279,19 @@ void Widget::showLabelForItem(QListWidgetItem* item, QString text) {
             
             if (!itemSelected && popup->lw->count() > 0) {
                 // Either not rotating or we didn't find a match. Select the target window.
-                HWND targetHwnd = group.windows.first().hwnd;
-                const auto lastActive = getLastActiveGroupWindow(group.exePath).first;
-                if (lastActive) {
-                    for (const auto& w : group.windows) {
-                        if (w.hwnd == lastActive) {
-                            targetHwnd = w.hwnd;
-                            break;
-                        }
-                    }
+                HWND targetHwnd = nullptr;
+                if (!groupWindowOrder.isEmpty()) {
+                    targetHwnd = groupWindowOrder.first();
                 }
                 
-                for (int i = 0; i < popup->lw->count(); i++) {
-                    auto wItem = popup->lw->item(i);
-                    auto h = reinterpret_cast<HWND>(wItem->data(Qt::UserRole).value<void*>());
-                    if (h == targetHwnd) {
-                        popup->lw->setCurrentItem(wItem);
-                        break;
+                if (targetHwnd) {
+                    for (int i = 0; i < popup->lw->count(); i++) {
+                        auto wItem = popup->lw->item(i);
+                        auto h = reinterpret_cast<HWND>(wItem->data(Qt::UserRole).value<void*>());
+                        if (h == targetHwnd) {
+                            popup->lw->setCurrentItem(wItem);
+                            break;
+                        }
                     }
                 }
             }

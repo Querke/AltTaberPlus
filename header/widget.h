@@ -81,7 +81,7 @@ public:
 
 private:
     bool forceShow();
-    void showLabelForItem(QListWidgetItem* item, QString text = QString());
+    void showLabelForItem(QListWidgetItem* item, QString text = QString(), HWND focusHwnd = nullptr);
     void setupLabelFont();
     auto getLastActiveGroupWindow(const QString& exePath) -> QPair<HWND, QDateTime>;
     auto getLastValidActiveGroupWindow(const WindowGroup& group) -> QPair<HWND, QDateTime>;

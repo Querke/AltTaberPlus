@@ -1,7 +1,8 @@
-﻿#include "utils/KeyboardHooker.h"
+#include "utils/KeyboardHooker.h"
 #include <QDebug>
 #include <QApplication>
 #include <QKeyEvent>
+#include <QTimer>
 #include "utils/Util.h"
 #include "widget.h"
 
@@ -71,6 +72,16 @@ KeyboardHooker::KeyboardHooker(QWidget* _receiver) {
     }
     KeyboardHooker::receiver = _receiver;
     qInfo() << "KeyboardHooker installed";
+    
+    // To ensure we stay at the top of the hook chain (especially when started automatically at logon via Task Scheduler),
+    // we re-install the hook after a short delay, allowing other startup apps to install their hooks first.
+    QTimer::singleShot(8000, [this]() {
+        if (this->h_keyboard) {
+            UnhookWindowsHookEx(this->h_keyboard);
+            this->h_keyboard = SetWindowsHookEx(WH_KEYBOARD_LL, (HOOKPROC) keyboardProc, GetModuleHandle(nullptr), 0);
+            qDebug() << "KeyboardHooker re-installed to stay at the top of the hook chain";
+        }
+    });
 }
 
 KeyboardHooker::~KeyboardHooker() {
