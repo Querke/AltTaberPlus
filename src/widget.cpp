@@ -33,10 +33,12 @@ public:
             }
             QListWidget::item {
                 padding: 6px 10px;
+                border-left: 3px solid transparent;
                 border-radius: 4px;
             }
             QListWidget::item:selected {
                 background-color: rgba(255, 255, 255, 40);
+                border-left: 3px solid #ffffff;
             }
         )");
         lw->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -101,7 +103,11 @@ Widget::Widget(QWidget* parent) : QWidget(parent), ui(new Ui::Widget) {
     lw->setItemDelegate(new IconOnlyDelegate(lw));
     lw->installEventFilter(this);
 
-    connect(lw, &QListWidget::currentItemChanged, this, [this](QListWidgetItem* cur, QListWidgetItem*) {
+    connect(lw, &QListWidget::currentItemChanged, this, [this](QListWidgetItem* cur, QListWidgetItem* prev) {
+        // Only clear when changing selection interactively between items (prevents initial load clear)
+        if (cur && prev && cur != prev) {
+            groupWindowOrder.clear(); 
+        }
         if (cur) showLabelForItem(cur);
     });
 
@@ -166,8 +172,8 @@ void Widget::keyPressEvent(QKeyEvent* event) {
         
         auto foreWin = GetForegroundWindow();
         if (groupWindowOrder.isEmpty()) {
-            auto targetExe = Util::getWindowProcessPath(foreWin);
-            groupWindowOrder = buildGroupWindowOrder(targetExe);
+            auto groupKey = getWindowGroupKey(foreWin);
+            groupWindowOrder = buildGroupWindowOrder(groupKey);
         }
         
         HWND nextWin = rotateWindowInGroup(groupWindowOrder, foreWin, !(modifiers & Qt::ShiftModifier));
@@ -221,8 +227,13 @@ void Widget::showLabelForItem(QListWidgetItem* item, QString text, HWND focusHwn
     bool isWindowRotation = !text.isNull();
 
     if (text.isNull()) {
-        auto path = item->data(Qt::UserRole).value<WindowGroup>().exePath;
-        text = Util::getFileDescription(path);
+        auto groupKey = item->data(Qt::UserRole).value<WindowGroup>().exePath;
+        if (groupKey.startsWith("pwa:")) {
+            // Using -1 gets the last split segment because Windows Drive paths have colons (C:\)
+            text = groupKey.section(':', -1);
+        } else {
+            text = Util::getFileDescription(groupKey);
+        }
     }
     ui->label->setText(text);
     ui->label->adjustSize();
@@ -305,8 +316,17 @@ void Widget::showLabelForItem(QListWidgetItem* item, QString text, HWND focusHwn
             int popupHeight = qMin(calculatedHeight, 400); 
             popup->resize(maxWidth, popupHeight);
             
-            // Position popup below the Widget
-            QPoint globalPos = this->mapToGlobal(QPoint(this->width() / 2 - popup->width() / 2, this->height() + 10));
+            // Position popup dynamically below the currently highlighted App Icon
+            int iconCenterX = lw->mapTo(this, itemRect.center()).x();
+            int localX = iconCenterX - popup->width() / 2;
+            
+            // Prevent the popup from drawing outside the left/right bounds of the main AltTaber bar
+            if (localX < 0) localX = 0;
+            if (localX + popup->width() > this->width()) {
+                localX = this->width() - popup->width();
+            }
+            
+            QPoint globalPos = this->mapToGlobal(QPoint(localX, this->height() + 10));
             popup->move(globalPos);
             popup->show();
             popup->raise();
@@ -377,33 +397,48 @@ void Widget::paintEvent(QPaintEvent*) { //不绘制会导致鼠标穿透背景
     painter.drawRect(rect());
 }
 
-/// 通知前台窗口变化
-/// @param hwnd 前台窗口句柄
-/// @param source 通知来源, for debug, @b Optional
+QString Widget::getWindowGroupKey(HWND hwnd) {
+    auto path = Util::getWindowProcessPath(hwnd);
+    if (path.isEmpty()) return path;
+    
+    // Separate Chrome / Edge PWAs from normal browser windows
+    if (path.endsWith("chrome.exe", Qt::CaseInsensitive) || path.endsWith("msedge.exe", Qt::CaseInsensitive)) {
+        QString windowTitle = Util::getWindowTitle(hwnd);
+        if (!windowTitle.isEmpty() && 
+            !windowTitle.endsWith("- Google Chrome", Qt::CaseInsensitive) && 
+            !windowTitle.endsWith("- Google Chrome Beta", Qt::CaseInsensitive) && 
+            !windowTitle.endsWith("- Google Chrome Dev", Qt::CaseInsensitive) && 
+            !windowTitle.endsWith("- Google Chrome Canary", Qt::CaseInsensitive) &&
+            !windowTitle.endsWith("Microsoft\u200B Edge", Qt::CaseInsensitive) && 
+            !windowTitle.endsWith("Microsoft Edge", Qt::CaseInsensitive)) {
+            // It's a PWA. Group it by its process + window title
+            return "pwa:" + path + ":" + windowTitle;
+        }
+    }
+    return path;
+}
+
 void Widget::notifyForegroundChanged(HWND hwnd, ForegroundChangeSource source) { // TODO isVisible or AltDown时，关闭前台更新通知
     if (hwnd == this->hWnd()) return;
-    // （其实监听前台变化只是为了排序，不需要太精确，可以放松限制）
-    // 通过`EVENT_SYSTEM_FOREGROUND`触发时忽略`IsWindowVisible`，因为窗口在创建瞬间可能不可见
     if (!Util::isWindowAcceptable(hwnd, source == WinEvent)) return;
-    auto path = Util::getWindowProcessPath(hwnd); // TODO 比较耗时，最好仅在单次show期间缓存，同时避免hwnd复用造成缓存错误
-    if (path.isEmpty() && source == WinEvent) {
-        // UWP apps: CoreWindow may not exist yet during launch, retry after a short delay
+    
+    auto groupKey = getWindowGroupKey(hwnd);
+    if (groupKey.isEmpty() && source == WinEvent) {
         QTimer::singleShot(500, this, [this, hwnd]() {
             if (!IsWindow(hwnd)) return;
-            auto path = Util::getWindowProcessPath(hwnd);
-            if (path.isEmpty()) return;
-            winActiveOrder[path].insert(hwnd, QDateTime::currentDateTime());
+            auto groupKey = getWindowGroupKey(hwnd);
+            if (groupKey.isEmpty()) return;
+            winActiveOrder[groupKey].insert(hwnd, QDateTime::currentDateTime());
             qDebug() << "*ForeWin changed (WinEvent-Retry):"
-                    << Util::getWindowTitle(hwnd) << Util::getClassName(hwnd) << path;
+                    << Util::getWindowTitle(hwnd) << Util::getClassName(hwnd) << groupKey;
         });
         return;
     }
-    // TODO 不能让winActiveOrder无限增长，需要定时清理
-    winActiveOrder[path].insert(hwnd, QDateTime::currentDateTime());
-
+    
+    winActiveOrder[groupKey].insert(hwnd, QDateTime::currentDateTime());
     auto sourceStr = QMetaEnum::fromType<ForegroundChangeSource>().valueToKey(source);
-    qDebug() << qUtf8Printable(QString("*ForeWin changed (%1):").arg(sourceStr)) // qUtf8Printable removes quotes ""
-            << Util::getWindowTitle(hwnd) << Util::getClassName(hwnd) << path << Util::getFileDescription(path);
+    qDebug() << qUtf8Printable(QString("*ForeWin changed (%1):").arg(sourceStr))
+            << Util::getWindowTitle(hwnd) << Util::getClassName(hwnd) << groupKey;
 } // TODO 控制面板 和 资源管理器 exe是同一个，如何区分图标
 
 /// collect, filter, sort Windows for presentation
@@ -412,19 +447,25 @@ QList<WindowGroup> Widget::prepareWindowGroupList() {
     const auto list = Util::listValidWindows();
     for (auto hwnd: list) {
         if (hwnd == this->hWnd()) continue; // skip self
-        auto path = Util::getWindowProcessPath(hwnd);
-        if (path.isEmpty()) continue; // TODO 可能需要管理员权限
-        auto& winGroup = winGroupMap[path];
+        auto groupKey = getWindowGroupKey(hwnd);
+        if (groupKey.isEmpty()) continue; // TODO 可能需要管理员权限
+        auto& winGroup = winGroupMap[groupKey];
         if (winGroup.exePath.isEmpty()) { // QIcon::isNull 判断可能不太准（例如空图标）
-            winGroup.exePath = path;
-            auto icon = Util::getCachedIcon(path, hwnd); // TODO background thread
-            if (path.endsWith("QQ\\bin\\QQ.exe", Qt::CaseInsensitive)) { // draw chat partner for classical QQ
-                QPixmap overlay = Util::getWindowIcon(hwnd);
-                const auto iSize = lw->iconSize();
-                QPixmap bgPixmap = icon.pixmap(iSize);
-                icon = Util::overlayIcon(bgPixmap, overlay, {{iSize.width() / 2, iSize.height() / 2}, iSize / 2});
+            winGroup.exePath = groupKey;
+            
+            if (groupKey.startsWith("pwa:")) {
+                // Use the specific window icon (favicon) directly for PWAs
+                winGroup.icon = QIcon(Util::getWindowIcon(hwnd));
+            } else {
+                auto icon = Util::getCachedIcon(groupKey, hwnd); // TODO background thread
+                if (groupKey.endsWith("QQ\\bin\\QQ.exe", Qt::CaseInsensitive)) { // draw chat partner for classical QQ
+                    QPixmap overlay = Util::getWindowIcon(hwnd);
+                    const auto iSize = lw->iconSize();
+                    QPixmap bgPixmap = icon.pixmap(iSize);
+                    icon = Util::overlayIcon(bgPixmap, overlay, {{iSize.width() / 2, iSize.height() / 2}, iSize / 2});
+                }
+                winGroup.icon = icon;
             }
-            winGroup.icon = icon;
         }
         winGroup.addWindow({Util::getWindowTitle(hwnd), Util::getClassName(hwnd), hwnd});
     }
@@ -572,10 +613,16 @@ void Widget::sortGroupWindows(QList<HWND>& windows, const QString& exePath) {
     }); // TODO update winActiveOrder! (remove invalid HWND)
 }
 
-/// group by exePath, sort by active order (last active first)
-QList<HWND> Widget::buildGroupWindowOrder(const QString& exePath) {
-    auto windows = Util::listValidWindows(exePath); // filter by path
-    sortGroupWindows(windows, exePath);
+/// group by exePath/groupKey, sort by active order (last active first)
+QList<HWND> Widget::buildGroupWindowOrder(const QString& groupKey) {
+    QList<HWND> windows;
+    auto allWindows = Util::listValidWindows();
+    for (auto hwnd : allWindows) {
+        if (getWindowGroupKey(hwnd) == groupKey) {
+            windows << hwnd;
+        }
+    }
+    sortGroupWindows(windows, groupKey);
     return windows;
 }
 
