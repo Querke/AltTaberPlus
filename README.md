@@ -1,4 +1,5 @@
 ﻿Fork of [AltTaber](https://github.com/MrBeanCpp/AltTaber) with some fixes and improvements:
+<img width="1422" height="659" alt="image" src="https://github.com/user-attachments/assets/b84a58a5-dcf0-4238-9ce5-722ef85bd7b7" />
 
 Features:
 * Multi-Window list: Apps with multiple windows now display a clean list of all window names below the app icon.
