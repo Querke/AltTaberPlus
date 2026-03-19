@@ -428,14 +428,49 @@ void Widget::notifyForegroundChanged(HWND hwnd, ForegroundChangeSource source) {
             if (!IsWindow(hwnd)) return;
             auto groupKey = getWindowGroupKey(hwnd);
             if (groupKey.isEmpty()) return;
-            winActiveOrder[groupKey].insert(hwnd, QDateTime::currentDateTime());
+            auto now = QDateTime::currentDateTime();
+            winActiveOrder[groupKey].insert(hwnd, now);
+            // Promote siblings (same logic as main path)
+            auto& groupOrder = winActiveOrder[groupKey];
+            QList<QPair<HWND, QDateTime>> siblings;
+            for (auto it = groupOrder.begin(); it != groupOrder.end(); ++it) {
+                if (it.key() != hwnd)
+                    siblings.append({it.key(), it.value()});
+            }
+            if (!siblings.isEmpty()) {
+                std::sort(siblings.begin(), siblings.end(), [](const auto& a, const auto& b) {
+                    return a.second > b.second;
+                });
+                for (int i = 0; i < siblings.size(); ++i)
+                    groupOrder.insert(siblings[i].first, now.addMSecs(-(i + 1)));
+            }
             qDebug() << "*ForeWin changed (WinEvent-Retry):"
                     << Util::getWindowTitle(hwnd) << Util::getClassName(hwnd) << groupKey;
         });
         return;
     }
     
-    winActiveOrder[groupKey].insert(hwnd, QDateTime::currentDateTime());
+    auto now = QDateTime::currentDateTime();
+    winActiveOrder[groupKey].insert(hwnd, now);
+
+    // Promote all sibling windows in the same group to keep the entire app near the top of MRU.
+    // Preserves relative order within the group: focused window = now, others = now - 1ms, -2ms, ...
+    auto& groupOrder = winActiveOrder[groupKey];
+    QList<QPair<HWND, QDateTime>> siblings;
+    for (auto it = groupOrder.begin(); it != groupOrder.end(); ++it) {
+        if (it.key() != hwnd)
+            siblings.append({it.key(), it.value()});
+    }
+    if (!siblings.isEmpty()) {
+        // Sort siblings by their existing timestamp (most recent first)
+        std::sort(siblings.begin(), siblings.end(), [](const auto& a, const auto& b) {
+            return a.second > b.second;
+        });
+        for (int i = 0; i < siblings.size(); ++i) {
+            groupOrder.insert(siblings[i].first, now.addMSecs(-(i + 1)));
+        }
+    }
+
     auto sourceStr = QMetaEnum::fromType<ForegroundChangeSource>().valueToKey(source);
     qDebug() << qUtf8Printable(QString("*ForeWin changed (%1):").arg(sourceStr))
             << Util::getWindowTitle(hwnd) << Util::getClassName(hwnd) << groupKey;
