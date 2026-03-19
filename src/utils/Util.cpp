@@ -280,16 +280,16 @@ namespace Util {
             "QQ Follower.exe"
         };
         LONG exStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
-        QString className;
+        QString className = getClassName(hwnd);
 
         if ((skipVisibleCheck || IsWindowVisible(hwnd))
             && (skipVisibleCheck || !isWindowCloaked(hwnd)) // 窗口创建瞬间可能处于cloaked状态
             // 窗口显示在任务栏的基本规则：https://devblogs.microsoft.com/oldnewthing/20031229-00/?p=41283
-            && (!GetWindow(hwnd, GW_OWNER) || exStyle & WS_EX_APPWINDOW) // OmApSvcBroker, QQ主面板（意料之外）; 保留：系统属性（Path）
+            && (!GetWindow(hwnd, GW_OWNER) || (exStyle & WS_EX_APPWINDOW) || className == "#32770") // OmApSvcBroker, QQ主面板（意料之外）; 保留：系统属性（Path）; #32770 = standard dialog (e.g. "Problem with Shortcut")
             && (exStyle & WS_EX_TOOLWINDOW) == 0 // 非工具窗口，但其实有些工具窗口没有这个这个属性
             //            && (exStyle & WS_EX_TOPMOST) == 0 // 非置顶窗口
             && GetWindowTextLength(hwnd) > 0
-            && (className = getClassName(hwnd)).size() > 0 // cache
+            && className.size() > 0
             && !BlackList_ClassName.contains(className)
             && !className.startsWith("imestatuspop_classname{") // 输入法（的推销弹窗）https://s3.bmp.ovh/imgs/2024/12/23/bb136fde101a41ce.png
         ) {
