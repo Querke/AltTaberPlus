@@ -14,8 +14,8 @@ set(VERSION_MINOR 5)
 set(VERSION_PATCH 0)
 
 set(COMPANY_NAME "MrBeanCpp")
-set(FILE_DESCRIPTION "AltTaber - Window Switcher")
-set(PRODUCT_NAME "AltTaber")
+set(FILE_DESCRIPTION "AltTaberPlus - Window Switcher")
+set(PRODUCT_NAME "AltTaberPlus")
 # 设置图标的相对路径
 # 图标会被缓存，修改后不生效的话，需要删除AppData\Local\IconCache.db & 重启资源管理器，该文件在PC重启后自动创建
 set(ICON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/img/icon.ico")
@@ -90,7 +90,7 @@ target_link_libraries(${PROJECT_NAME}
 # 必须放在find_package之后，否则`Qt6Gui_PRIVATE_INCLUDE_DIRS`变量未定义
 target_include_directories(${PROJECT_NAME} PRIVATE ${Qt6Gui_PRIVATE_INCLUDE_DIRS})
 
-set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "AltTaber") # 设置输出文件名
+set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "AltTaberPlus") # 设置输出文件名
 
 # For MSVC multi-config generators, CMAKE_BUILD_TYPE is usually empty at configure time.
 # Tell CMake to hide the console specifically when building Release config.

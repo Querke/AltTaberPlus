@@ -591,6 +591,27 @@ bool Widget::prepareListWidget(bool selectCurrentApp) {
                 break;
             }
         }
+        // If the foreground window wasn't found, walk the owner chain.
+        // Owned windows (e.g., Unity's "Package Manager") are filtered out by isWindowAcceptable
+        // but their owner (the main app window) is in the list.
+        if (!isFirstItemForeground) {
+            HWND owner = foreWin;
+            while ((owner = GetWindow(owner, GW_OWNER)) != nullptr) {
+                for (auto& info: winGroupList.at(0).windows) {
+                    if (info.hwnd == owner) {
+                        isFirstItemForeground = true;
+                        break;
+                    }
+                }
+                if (isFirstItemForeground) break;
+            }
+        }
+
+        qDebug() << "ForeWin:" << foreWin << Util::getWindowTitle(foreWin)
+                 << "owner:" << GetWindow(foreWin, GW_OWNER)
+                 << "isFirstItemFore:" << isFirstItemForeground
+                 << "row:" << (selectCurrentApp ? 0 : (isFirstItemForeground ? 1 : 0));
+
         // 如果第一个item是前台窗口，就选中第二个
         // 因为有些情况：选中桌面 并不会产生一个item
         if (selectCurrentApp) {
