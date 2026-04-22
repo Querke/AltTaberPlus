@@ -113,9 +113,10 @@ Widget::Widget(QWidget* parent) : QWidget(parent), ui(new Ui::Widget) {
 
     connect(qApp, &QApplication::focusWindowChanged, this, [this](QWindow* focusWindow) {
         if (focusWindow == nullptr) {
-            if (!this->underMouse()) // hide when lost focus & mouse outside (means user choose to)
+            if (!this->underMouse()) { // hide when lost focus & mouse outside (means user choose to)
                 hide();
-            else { // Windows Terminal will do
+                if (popup) popup->hide();
+            } else { // Windows Terminal will do
                 qWarning() << "Someone tried to steal focus!";
             }
         }
@@ -377,6 +378,14 @@ void Widget::keyReleaseEvent(QKeyEvent* event) {
                         targetHwnd = targetWin.hwnd;
                     }
                     if (targetHwnd) {
+                        // Raise all non-minimized sibling windows above other apps (least-recent first
+                        // so most-recent sibling lands just below the focused window in Z-order)
+                        auto siblings = buildGroupWindowOrder(group.exePath);
+                        for (int i = siblings.size() - 1; i >= 0; --i) {
+                            HWND sib = siblings.at(i);
+                            if (sib != targetHwnd)
+                                Util::bringWindowToTop(sib, this->hWnd());
+                        }
                         Util::switchToWindow(targetHwnd);
                         qInfo() << "Switch to" << targetHwnd << group.exePath;
                     }
@@ -426,9 +435,12 @@ void Widget::notifyForegroundChanged(HWND hwnd, ForegroundChangeSource source) {
     if (groupKey.isEmpty() && source == WinEvent) {
         QTimer::singleShot(500, this, [this, hwnd]() {
             if (!IsWindow(hwnd)) return;
+            auto now = QDateTime::currentDateTime();
+            // Always record by HWND as fallback, even if groupKey is still unavailable
+            // (e.g. UWP app whose core window isn't attached yet during initial load)
+            hwndActiveTime.insert(hwnd, now);
             auto groupKey = getWindowGroupKey(hwnd);
             if (groupKey.isEmpty()) return;
-            auto now = QDateTime::currentDateTime();
             winActiveOrder[groupKey].insert(hwnd, now);
             // Promote siblings (same logic as main path)
             auto& groupOrder = winActiveOrder[groupKey];
@@ -441,8 +453,10 @@ void Widget::notifyForegroundChanged(HWND hwnd, ForegroundChangeSource source) {
                 std::sort(siblings.begin(), siblings.end(), [](const auto& a, const auto& b) {
                     return a.second > b.second;
                 });
-                for (int i = 0; i < siblings.size(); ++i)
+                for (int i = 0; i < siblings.size(); ++i) {
                     groupOrder.insert(siblings[i].first, now.addMSecs(-(i + 1)));
+                    hwndActiveTime.insert(siblings[i].first, now.addMSecs(-(i + 1)));
+                }
             }
             qDebug() << "*ForeWin changed (WinEvent-Retry):"
                     << Util::getWindowTitle(hwnd) << Util::getClassName(hwnd) << groupKey;
@@ -452,6 +466,7 @@ void Widget::notifyForegroundChanged(HWND hwnd, ForegroundChangeSource source) {
     
     auto now = QDateTime::currentDateTime();
     winActiveOrder[groupKey].insert(hwnd, now);
+    hwndActiveTime.insert(hwnd, now);
 
     // Promote all sibling windows in the same group to keep the entire app near the top of MRU.
     // Preserves relative order within the group: focused window = now, others = now - 1ms, -2ms, ...
@@ -468,6 +483,7 @@ void Widget::notifyForegroundChanged(HWND hwnd, ForegroundChangeSource source) {
         });
         for (int i = 0; i < siblings.size(); ++i) {
             groupOrder.insert(siblings[i].first, now.addMSecs(-(i + 1)));
+            hwndActiveTime.insert(siblings[i].first, now.addMSecs(-(i + 1)));
         }
     }
 
@@ -646,26 +662,43 @@ auto Widget::getLastActiveGroupWindow(const QString& exePath) -> QPair<HWND, QDa
 /// return null if no window recorded in group
 auto Widget::getLastValidActiveGroupWindow(const WindowGroup& group) -> QPair<HWND, QDateTime> {
     auto hwndOrder = winActiveOrder.value(group.exePath);
-    if (hwndOrder.isEmpty()) return {nullptr, QDateTime()};
 
     QList<HWND> windows;
     for (auto& info: group.windows)
         windows << info.hwnd;
     sortGroupWindows(windows, group.exePath);
 
-    if (auto time = hwndOrder.value(windows.first()); !time.isNull())
-        return {windows.first(), time};
-    else // check if the first HWND is recorded
-        return {nullptr, QDateTime()};
+    if (!hwndOrder.isEmpty()) {
+        if (auto time = hwndOrder.value(windows.first()); !time.isNull())
+            return {windows.first(), time};
+    }
+
+    // Fallback: search hwndActiveTime directly by HWND.
+    // Handles two cases:
+    //   1. PWA (e.g. Gemini): window title changes → groupKey changes → winActiveOrder misses it
+    //   2. UWP on first launch: getAppCoreWindow() fails initially → groupKey was never recorded
+    HWND bestHwnd = nullptr;
+    QDateTime bestTime;
+    for (auto& info : group.windows) {
+        auto t = hwndActiveTime.value(info.hwnd);
+        if (!t.isNull() && (bestTime.isNull() || t > bestTime)) {
+            bestTime = t;
+            bestHwnd = info.hwnd;
+        }
+    }
+    return {bestHwnd, bestTime};
 }
 
 /// sort Windows of [Group specified by exePath], by active order (latest first)
 void Widget::sortGroupWindows(QList<HWND>& windows, const QString& exePath) {
     auto activeOrdMap = winActiveOrder.value(exePath);
-    if (activeOrdMap.isEmpty()) return;
-    // sort by active order
-    std::sort(windows.begin(), windows.end(), [&activeOrdMap](HWND a, HWND b) {
-        return activeOrdMap.value(a) > activeOrdMap.value(b); // default value if not found
+    // sort by active order, falling back to hwndActiveTime when groupKey-based entry is missing
+    std::sort(windows.begin(), windows.end(), [&](HWND a, HWND b) {
+        auto timeA = activeOrdMap.value(a);
+        auto timeB = activeOrdMap.value(b);
+        if (timeA.isNull()) timeA = hwndActiveTime.value(a);
+        if (timeB.isNull()) timeB = hwndActiveTime.value(b);
+        return timeA > timeB;
     }); // TODO update winActiveOrder! (remove invalid HWND)
 }
 

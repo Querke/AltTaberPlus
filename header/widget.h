@@ -97,6 +97,8 @@ private:
     const QMargins ListWidgetMargin{24, 24, 24, 24};
     /// exePath -> (HWND, time)
     QHash<QString, QHash<HWND, QDateTime>> winActiveOrder;
+    /// Flat HWND -> time fallback: survives groupKey changes (PWA title change, UWP load failure)
+    QHash<HWND, QDateTime> hwndActiveTime;
     QList<HWND> groupWindowOrder; // for Alt+` 同组窗口切换
     WindowListPopup* popup = nullptr;
 };
