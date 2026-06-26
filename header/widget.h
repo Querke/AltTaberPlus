@@ -68,7 +68,7 @@ public:
     bool prepareListWidget(bool selectCurrentApp = false);
     Q_INVOKABLE bool requestShow();
     bool requestShowForCurrentApp();
-    void notifyForegroundChanged(HWND hwnd, ForegroundChangeSource source);
+    void notifyForegroundChanged(HWND hwnd, ForegroundChangeSource source, int retries = 3);
 
     HWND hWnd() { return (HWND) winId(); }
 
@@ -84,10 +84,14 @@ private:
     void showLabelForItem(QListWidgetItem* item, QString text = QString(), HWND focusHwnd = nullptr);
     void setupLabelFont();
     QString getWindowGroupKey(HWND hwnd);
+    void recordWindowActive(HWND hwnd, const QString& groupKey, const QDateTime& now);
+    void recordFocusEvent(const QString& groupKey, HWND hwnd);
+    void captureForegroundActive();
     auto getLastActiveGroupWindow(const QString& exePath) -> QPair<HWND, QDateTime>;
     auto getLastValidActiveGroupWindow(const WindowGroup& group) -> QPair<HWND, QDateTime>;
     void sortGroupWindows(QList<HWND>& windows, const QString& exePath);
     QList<HWND> buildGroupWindowOrder(const QString& exePath);
+    QList<HWND> recentGroupRun(const QList<HWND>& siblings, const QString& groupKey);
     static HWND rotateWindowInGroup(const QList<HWND>& windows, HWND current, bool forward = true);
     static HWND rotateNormalWindowInGroup(const QList<HWND>& windows, HWND current, bool forward = true);
 
@@ -99,6 +103,10 @@ private:
     QHash<QString, QHash<HWND, QDateTime>> winActiveOrder;
     /// Flat HWND -> time fallback: survives groupKey changes (PWA title change, UWP load failure)
     QHash<HWND, QDateTime> hwndActiveTime;
+    /// Ordered log of genuine per-window focus events (newest last), each tagged with its groupKey.
+    /// Unlike the time maps above (which re-stamp a whole group together), this preserves the real
+    /// interleaving of apps over time, so we can find the group's most-recent uninterrupted run.
+    QList<QPair<QString, HWND>> focusHistory;
     QList<HWND> groupWindowOrder; // for Alt+` 同组窗口切换
     WindowListPopup* popup = nullptr;
 };

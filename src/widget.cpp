@@ -9,6 +9,7 @@
 #include <QPainter>
 #include <QPen>
 #include <QDateTime>
+#include <QSet>
 #include "utils/QtWin.h"
 #include <QWheelEvent>
 #include <QTimer>
@@ -378,14 +379,18 @@ void Widget::keyReleaseEvent(QKeyEvent* event) {
                         targetHwnd = targetWin.hwnd;
                     }
                     if (targetHwnd) {
-                        // Raise all non-minimized sibling windows above other apps (least-recent first
-                        // so most-recent sibling lands just below the focused window in Z-order)
-                        auto siblings = buildGroupWindowOrder(group.exePath);
-                        for (int i = siblings.size() - 1; i >= 0; --i) {
-                            HWND sib = siblings.at(i);
-                            if (sib != targetHwnd)
+                        auto run = recentGroupRun(buildGroupWindowOrder(group.exePath), group.exePath);
+                        for (int i = run.size() - 1; i >= 0; --i) {
+                            HWND sib = run.at(i);
+                            if (sib != targetHwnd && !IsIconic(sib)) {
                                 Util::bringWindowToTop(sib, this->hWnd());
+                                // Only the target gets a real OS focus event below; without logging the
+                                // raised siblings too, a later tab-away-and-back would see them as stale
+                                // and collapse the run to a single window. Re-log the cluster contiguously.
+                                recordFocusEvent(group.exePath, sib);
+                            }
                         }
+                        recordFocusEvent(group.exePath, targetHwnd); // target is newest in the cluster
                         Util::switchToWindow(targetHwnd);
                         qInfo() << "Switch to" << targetHwnd << group.exePath;
                     }
@@ -427,73 +432,86 @@ QString Widget::getWindowGroupKey(HWND hwnd) {
     return path;
 }
 
-void Widget::notifyForegroundChanged(HWND hwnd, ForegroundChangeSource source) { // TODO isVisible or AltDown时，关闭前台更新通知
-    if (hwnd == this->hWnd()) return;
-    if (!Util::isWindowAcceptable(hwnd, source == WinEvent)) return;
-    
-    auto groupKey = getWindowGroupKey(hwnd);
-    if (groupKey.isEmpty() && source == WinEvent) {
-        QTimer::singleShot(500, this, [this, hwnd]() {
-            if (!IsWindow(hwnd)) return;
-            auto now = QDateTime::currentDateTime();
-            // Always record by HWND as fallback, even if groupKey is still unavailable
-            // (e.g. UWP app whose core window isn't attached yet during initial load)
-            hwndActiveTime.insert(hwnd, now);
-            auto groupKey = getWindowGroupKey(hwnd);
-            if (groupKey.isEmpty()) return;
-            winActiveOrder[groupKey].insert(hwnd, now);
-            // Promote siblings (same logic as main path)
-            auto& groupOrder = winActiveOrder[groupKey];
-            QList<QPair<HWND, QDateTime>> siblings;
-            for (auto it = groupOrder.begin(); it != groupOrder.end(); ++it) {
-                if (it.key() != hwnd)
-                    siblings.append({it.key(), it.value()});
-            }
-            if (!siblings.isEmpty()) {
-                std::sort(siblings.begin(), siblings.end(), [](const auto& a, const auto& b) {
-                    return a.second > b.second;
-                });
-                for (int i = 0; i < siblings.size(); ++i) {
-                    groupOrder.insert(siblings[i].first, now.addMSecs(-(i + 1)));
-                    hwndActiveTime.insert(siblings[i].first, now.addMSecs(-(i + 1)));
-                }
-            }
-            qDebug() << "*ForeWin changed (WinEvent-Retry):"
-                    << Util::getWindowTitle(hwnd) << Util::getClassName(hwnd) << groupKey;
-        });
-        return;
-    }
-    
-    auto now = QDateTime::currentDateTime();
+/// Record `hwnd` (and its group) as active at `now`, promoting the whole app near the top of MRU.
+/// Preserves relative order within the group: focused window = now, others = now - 1ms, -2ms, ...
+void Widget::recordWindowActive(HWND hwnd, const QString& groupKey, const QDateTime& now) {
     winActiveOrder[groupKey].insert(hwnd, now);
     hwndActiveTime.insert(hwnd, now);
+    recordFocusEvent(groupKey, hwnd); // genuine focus of this exact window; siblings below are NOT logged
 
-    // Promote all sibling windows in the same group to keep the entire app near the top of MRU.
-    // Preserves relative order within the group: focused window = now, others = now - 1ms, -2ms, ...
     auto& groupOrder = winActiveOrder[groupKey];
     QList<QPair<HWND, QDateTime>> siblings;
     for (auto it = groupOrder.begin(); it != groupOrder.end(); ++it) {
         if (it.key() != hwnd)
             siblings.append({it.key(), it.value()});
     }
-    if (!siblings.isEmpty()) {
-        // Sort siblings by their existing timestamp (most recent first)
-        std::sort(siblings.begin(), siblings.end(), [](const auto& a, const auto& b) {
-            return a.second > b.second;
-        });
-        for (int i = 0; i < siblings.size(); ++i) {
-            groupOrder.insert(siblings[i].first, now.addMSecs(-(i + 1)));
-            hwndActiveTime.insert(siblings[i].first, now.addMSecs(-(i + 1)));
-        }
+    if (siblings.isEmpty()) return;
+    // Sort siblings by their existing timestamp (most recent first), then re-stamp just behind `hwnd`
+    std::sort(siblings.begin(), siblings.end(), [](const auto& a, const auto& b) {
+        return a.second > b.second;
+    });
+    for (int i = 0; i < siblings.size(); ++i) {
+        groupOrder.insert(siblings[i].first, now.addMSecs(-(i + 1)));
+        hwndActiveTime.insert(siblings[i].first, now.addMSecs(-(i + 1)));
     }
+}
+
+void Widget::notifyForegroundChanged(HWND hwnd, ForegroundChangeSource source, int retries) { // TODO isVisible or AltDown时，关闭前台更新通知
+    if (hwnd == this->hWnd()) return;
+
+    // A window isn't always ready the instant its foreground event fires: a freshly-launched or
+    // slow-starting window often has no title / unresolved exe path yet, so it isn't "acceptable"
+    // or groupable. Dropping it here is fatal — once it's already foreground, no further event
+    // fires, so it's never recorded and sinks to the bottom of the MRU list. Retry instead.
+    bool ready = Util::isWindowAcceptable(hwnd, source == WinEvent);
+    QString groupKey = ready ? getWindowGroupKey(hwnd) : QString();
+    if (!ready || groupKey.isEmpty()) {
+        if (source == WinEvent && retries > 0) {
+            QTimer::singleShot(300, this, [this, hwnd, retries]() {
+                if (IsWindow(hwnd) && hwnd == GetForegroundWindow())
+                    notifyForegroundChanged(hwnd, WinEvent, retries - 1);
+            });
+        } else if (ready && IsWindow(hwnd)) {
+            // Acceptable but still ungroupable after retries (e.g. UWP core window never attached):
+            // keep a flat HWND timestamp so getLastValidActiveGroupWindow's fallback can order it.
+            hwndActiveTime.insert(hwnd, QDateTime::currentDateTime());
+            recordFocusEvent(QString(), hwnd); // empty group = treated as a boundary in the history
+        }
+        return;
+    }
+
+    recordWindowActive(hwnd, groupKey, QDateTime::currentDateTime());
 
     auto sourceStr = QMetaEnum::fromType<ForegroundChangeSource>().valueToKey(source);
     qDebug() << qUtf8Printable(QString("*ForeWin changed (%1):").arg(sourceStr))
             << Util::getWindowTitle(hwnd) << Util::getClassName(hwnd) << groupKey;
 } // TODO 控制面板 和 资源管理器 exe是同一个，如何区分图标
 
+/// Stamp the *current* foreground window as active now, so the app you're using (or just launched)
+/// is always at the top of the MRU — even if its EVENT_SYSTEM_FOREGROUND was missed because the
+/// window had no title yet when it fired. This is the authoritative correction at display time.
+void Widget::captureForegroundActive() {
+    HWND foreWin = GetForegroundWindow();
+    if (!foreWin || foreWin == this->hWnd()) return;
+
+    // Resolve to the listed (top-level, acceptable) window: usually the foreground window itself,
+    // but for owned dialogs (e.g. Unity's "Package Manager") it's the owner that appears in the list.
+    HWND target = foreWin;
+    while (target && !Util::isWindowAcceptable(target, false))
+        target = GetWindow(target, GW_OWNER);
+    if (!target) return;
+
+    auto groupKey = getWindowGroupKey(target);
+    if (groupKey.isEmpty()) return;
+    recordWindowActive(target, groupKey, QDateTime::currentDateTime());
+}
+
 /// collect, filter, sort Windows for presentation
 QList<WindowGroup> Widget::prepareWindowGroupList() {
+    // Assert the current foreground app as most-recently-active before sorting, so it's always on
+    // top even if its foreground event was missed (slow launch / no title at event time).
+    captureForegroundActive();
+
     QMap<QString, WindowGroup> winGroupMap;
     const auto list = Util::listValidWindows();
     for (auto hwnd: list) {
@@ -694,12 +712,58 @@ void Widget::sortGroupWindows(QList<HWND>& windows, const QString& exePath) {
     auto activeOrdMap = winActiveOrder.value(exePath);
     // sort by active order, falling back to hwndActiveTime when groupKey-based entry is missing
     std::sort(windows.begin(), windows.end(), [&](HWND a, HWND b) {
+        bool aMin = IsIconic(a);
+        bool bMin = IsIconic(b);
+        if (aMin != bMin) return !aMin; // minimized windows sort last
         auto timeA = activeOrdMap.value(a);
         auto timeB = activeOrdMap.value(b);
         if (timeA.isNull()) timeA = hwndActiveTime.value(a);
         if (timeB.isNull()) timeB = hwndActiveTime.value(b);
         return timeA > timeB;
     }); // TODO update winActiveOrder! (remove invalid HWND)
+}
+
+/// Append a genuine focus event to the history, collapsing consecutive duplicates and capping length.
+void Widget::recordFocusEvent(const QString& groupKey, HWND hwnd) {
+    if (!focusHistory.isEmpty() && focusHistory.last().second == hwnd) {
+        focusHistory.last().first = groupKey; // refresh groupKey (e.g. PWA title settled), keep one entry
+        return;
+    }
+    focusHistory.append({groupKey, hwnd});
+    constexpr int MaxHistory = 256;
+    if (focusHistory.size() > MaxHistory)
+        focusHistory.remove(0, focusHistory.size() - MaxHistory);
+}
+
+/// Of the group's windows (sorted newest-active first), keep only the group's most-recent *contiguous
+/// run* in the real focus timeline — i.e. drop windows that sit below an intervening foreign-app focus.
+/// This stops a freshly-touched app from dragging up siblings you haven't looked at in ages.
+QList<HWND> Widget::recentGroupRun(const QList<HWND>& siblings, const QString& groupKey) {
+    if (siblings.size() <= 1) return siblings;
+
+    const QSet<HWND> groupSet(siblings.begin(), siblings.end());
+
+    // Find the group's most recent focus in the history; without one we have nothing to anchor against.
+    int last = -1;
+    for (int i = focusHistory.size() - 1; i >= 0; --i) {
+        if (focusHistory.at(i).first == groupKey) { last = i; break; }
+    }
+    if (last < 0) return siblings; // group never recorded → preserve raise-all behavior
+
+    // Walk backwards from there, collecting still-open group windows until a *foreign* focus interrupts.
+    // Same-group entries for already-closed windows don't break the run (they're just skipped).
+    QSet<HWND> runSet;
+    for (int i = last; i >= 0; --i) {
+        const auto& ev = focusHistory.at(i);
+        if (ev.first != groupKey) break; // a different app was focused here → end of the recent run
+        if (groupSet.contains(ev.second)) runSet.insert(ev.second);
+    }
+
+    QList<HWND> run;
+    for (HWND h : siblings)
+        if (runSet.contains(h)) run << h;
+    if (run.isEmpty()) run << siblings.first(); // safety: always keep the newest
+    return run;
 }
 
 /// group by exePath/groupKey, sort by active order (last active first)
