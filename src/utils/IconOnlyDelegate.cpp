@@ -1,4 +1,5 @@
 ﻿#include "utils/IconOnlyDelegate.h"
+#include <QPainterPath>
 #include "widget.h"
 
 void IconOnlyDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const {
@@ -6,8 +7,21 @@ void IconOnlyDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opti
     painter->setPen(Qt::NoPen); //取消边框
     // option.rect.size() == QListWidgetItem::sizeHint()
     if (option.state & QStyle::State_Selected) {
+        QPainterPath path;
+        path.addRoundedRect(option.rect, radius, radius);
         painter->setBrush(selectedColor);
-        painter->drawRoundedRect(option.rect, radius, radius);
+        painter->drawPath(path);
+
+        // light inner shadow: strokes are clipped to the path, leaving only their inner half
+        painter->save();
+        painter->setClipPath(path);
+        painter->setBrush(Qt::NoBrush);
+        for (int i = 0; i < 5; ++i) {
+            painter->setPen(QPen(QColor(255, 255, 255, 45 - i * 8), 2 + i * 2));
+            painter->drawPath(path);
+        }
+        painter->restore();
+        painter->setPen(Qt::NoPen);
     } else if (option.state & QStyle::State_MouseOver) {
         painter->setBrush(hoverColor);
         painter->drawRoundedRect(option.rect, radius, radius);

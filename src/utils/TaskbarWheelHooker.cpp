@@ -33,7 +33,7 @@ LRESULT mouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
                 }
                 auto exePath = AppUtil::getExePathFromAppIdOrName(appid, name);
 //                qDebug() << name << windows << appid;
-                emit TaskbarWheelHooker::instance->tabWheelEvent(exePath, delta > 0, windows);
+                emit TaskbarWheelHooker::instance->tabWheelEvent(appid, exePath, delta > 0, windows);
             }
         }
     }

@@ -197,6 +197,63 @@ namespace Util {
         return desc;
     }
 
+    static QString getWindowShellProperty(HWND hwnd, const PROPERTYKEY& key) {
+        CComPtr<IPropertyStore> store;
+        if (FAILED(SHGetPropertyStoreForWindow(hwnd, IID_PPV_ARGS(&store)))) return {};
+
+        PROPVARIANT var;
+        PropVariantInit(&var);
+        QString value;
+        if (SUCCEEDED(store->GetValue(key, &var)) && var.vt == VT_LPWSTR)
+            value = QString::fromWCharArray(var.pwszVal);
+        PropVariantClear(&var);
+        return value;
+    }
+
+    /// Taskbar identity of a window. Chrome/Edge stamp a distinct one per profile and per PWA,
+    /// which is exactly how the taskbar draws them as separate buttons. Empty for most apps.
+    QString getWindowAppId(HWND hwnd) {
+        return getWindowShellProperty(hwnd, PKEY_AppUserModel_ID);
+    }
+
+    QString getWindowAppIconResource(HWND hwnd) {
+        return getWindowShellProperty(hwnd, PKEY_AppUserModel_RelaunchIconResource);
+    }
+
+    QString getWindowAppName(HWND hwnd) {
+        auto name = getWindowShellProperty(hwnd, PKEY_AppUserModel_RelaunchDisplayNameResource);
+        return name.startsWith('@') ? QString() : name; // indirect resource string, not worth resolving
+    }
+
+    /// Load an icon from a "file,index" reference, as used by RelaunchIconResource
+    QIcon getResourceIcon(const QString& resource) {
+        if (resource.isEmpty()) return {};
+        static QHash<QString, QIcon> IconCache;
+        if (auto icon = IconCache.value(resource); !icon.isNull())
+            return icon;
+
+        QString file = resource;
+        int index = 0;
+        if (auto comma = resource.lastIndexOf(','); comma > 0) {
+            bool isNumber = false;
+            if (int i = resource.mid(comma + 1).toInt(&isNumber); isNumber) {
+                index = i;
+                file = resource.left(comma);
+            }
+        }
+
+        QIcon icon;
+        HICON hIcon = nullptr;
+        if (SUCCEEDED(SHDefExtractIcon(file.toStdWString().c_str(), index, 0, &hIcon, nullptr, 256)) && hIcon) {
+            icon = QIcon(QtWin::fromHICON(hIcon));
+            DestroyIcon(hIcon);
+        } else {
+            qWarning() << "Failed to extract icon resource:" << resource;
+        }
+        IconCache.insert(resource, icon);
+        return icon;
+    }
+
     bool isTopMost(HWND hwnd) {
         return GetWindowLong(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST;
     }

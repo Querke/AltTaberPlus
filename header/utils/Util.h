@@ -12,6 +12,10 @@ namespace Util {
     QString getClassName(HWND hwnd);
     bool isWindowElevated(HWND hwnd);
     QString getWindowProcessPath(HWND hwnd);
+    QString getWindowAppId(HWND hwnd);
+    QString getWindowAppIconResource(HWND hwnd);
+    QString getWindowAppName(HWND hwnd);
+    QIcon getResourceIcon(const QString& resource);
     QList<QString> getChildProcessPaths(const QString& exePath);
     QString getFileDescription(const QString& path);
     bool isTopMost(HWND hwnd);

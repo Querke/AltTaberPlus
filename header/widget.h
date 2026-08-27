@@ -31,7 +31,9 @@ struct WindowGroup {
         windows.append(window);
     }
 
+    QString key; // taskbar identity: AppUserModelId when the window has one, else exePath
     QString exePath;
+    QString name;
     QIcon icon;
     QList<WindowInfo> windows;
 };
@@ -76,7 +78,7 @@ public:
 
     ~Widget() override;
     bool eventFilter(QObject* watched, QEvent* event) override;
-    void rotateTaskbarWindowInGroup(const QString& exePath, bool forward, int windows);
+    void rotateTaskbarWindowInGroup(const QString& appId, const QString& exePath, bool forward, int windows);
     void clearGroupWindowOrder();
 
 private:
@@ -87,10 +89,10 @@ private:
     void recordWindowActive(HWND hwnd, const QString& groupKey, const QDateTime& now);
     void recordFocusEvent(const QString& groupKey, HWND hwnd);
     void captureForegroundActive();
-    auto getLastActiveGroupWindow(const QString& exePath) -> QPair<HWND, QDateTime>;
+    auto getLastActiveGroupWindow(const QString& groupKey) -> QPair<HWND, QDateTime>;
     auto getLastValidActiveGroupWindow(const WindowGroup& group) -> QPair<HWND, QDateTime>;
-    void sortGroupWindows(QList<HWND>& windows, const QString& exePath);
-    QList<HWND> buildGroupWindowOrder(const QString& exePath);
+    void sortGroupWindows(QList<HWND>& windows, const QString& groupKey);
+    QList<HWND> buildGroupWindowOrder(const QString& groupKey);
     QList<HWND> recentGroupRun(const QList<HWND>& siblings, const QString& groupKey);
     static HWND rotateWindowInGroup(const QList<HWND>& windows, HWND current, bool forward = true);
     static HWND rotateNormalWindowInGroup(const QList<HWND>& windows, HWND current, bool forward = true);
@@ -99,9 +101,9 @@ private:
     Ui::Widget* ui;
     QListWidget* lw = nullptr;
     const QMargins ListWidgetMargin{24, 24, 24, 24};
-    /// exePath -> (HWND, time)
+    /// groupKey -> (HWND, time)
     QHash<QString, QHash<HWND, QDateTime>> winActiveOrder;
-    /// Flat HWND -> time fallback: survives groupKey changes (PWA title change, UWP load failure)
+    /// Flat HWND -> time fallback: survives groupKey changes (e.g. UWP load failure)
     QHash<HWND, QDateTime> hwndActiveTime;
     /// Ordered log of genuine per-window focus events (newest last), each tagged with its groupKey.
     /// Unlike the time maps above (which re-stamp a whole group together), this preserves the real

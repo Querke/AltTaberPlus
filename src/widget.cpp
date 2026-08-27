@@ -83,7 +83,7 @@ Widget::Widget(QWidget* parent) : QWidget(parent), ui(new Ui::Widget) {
     lw->setViewMode(QListView::IconMode);
     lw->setMovement(QListView::Static);
     lw->setFlow(QListView::LeftToRight);
-    lw->setWrapping(false);
+    lw->setWrapping(true); // rows are capped to the screen width in prepareListWidget
     lw->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     lw->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     lw->setIconSize({64, 64});
@@ -150,7 +150,7 @@ void Widget::keyPressEvent(QKeyEvent* event) {
             if (auto item = lw->currentItem()) {
                 auto windowGroup = item->data(Qt::UserRole).value<WindowGroup>();
                 if (groupWindowOrder.isEmpty())
-                    groupWindowOrder = buildGroupWindowOrder(windowGroup.exePath);
+                    groupWindowOrder = buildGroupWindowOrder(windowGroup.key);
                 
                 HWND currentHwnd = nullptr;
                 if (popup && popup->isVisible() && popup->lw->currentItem()) {
@@ -229,19 +229,15 @@ void Widget::showLabelForItem(QListWidgetItem* item, QString text, HWND focusHwn
     bool isWindowRotation = !text.isNull();
 
     if (text.isNull()) {
-        auto groupKey = item->data(Qt::UserRole).value<WindowGroup>().exePath;
-        if (groupKey.startsWith("pwa:")) {
-            // Using -1 gets the last split segment because Windows Drive paths have colons (C:\)
-            text = groupKey.section(':', -1);
-        } else {
-            text = Util::getFileDescription(groupKey);
-        }
+        auto group = item->data(Qt::UserRole).value<WindowGroup>();
+        text = group.name.isEmpty() ? Util::getFileDescription(group.exePath) : group.name;
     }
     ui->label->setText(text);
     ui->label->adjustSize();
 
     auto itemRect = lw->visualItemRect(item);
-    auto center = itemRect.center() + QPoint(0, itemRect.height() / 2 + ListWidgetMargin.bottom() / 2);
+    // below the whole grid, not just the item's row, so the label never covers the row underneath
+    auto center = QPoint(itemRect.center().x(), lw->height() + ListWidgetMargin.bottom() / 2);
     center = lw->mapTo(this, center);
     auto labelRect = ui->label->rect();
     labelRect.moveCenter(center);
@@ -264,7 +260,7 @@ void Widget::showLabelForItem(QListWidgetItem* item, QString text, HWND focusHwn
             bool itemSelected = false;
 
             if (groupWindowOrder.isEmpty()) {
-                groupWindowOrder = buildGroupWindowOrder(group.exePath);
+                groupWindowOrder = buildGroupWindowOrder(group.key);
             }
             
             // Build the list items matching the verified groupWindowOrder order which correctly reflects valid active windows
@@ -369,7 +365,7 @@ void Widget::keyReleaseEvent(QKeyEvent* event) {
                         targetHwnd = reinterpret_cast<HWND>(popup->lw->currentItem()->data(Qt::UserRole).value<void*>());
                     } else {
                         WindowInfo targetWin = group.windows.at(0); // TODO 需要排序（lastActiveWindow 被关闭情况下）
-                        const auto lastActive = getLastActiveGroupWindow(group.exePath).first;
+                        const auto lastActive = getLastActiveGroupWindow(group.key).first;
                         for (auto& info: group.windows) {
                             if (info.hwnd == lastActive) {
                                 targetWin = info;
@@ -379,7 +375,7 @@ void Widget::keyReleaseEvent(QKeyEvent* event) {
                         targetHwnd = targetWin.hwnd;
                     }
                     if (targetHwnd) {
-                        auto run = recentGroupRun(buildGroupWindowOrder(group.exePath), group.exePath);
+                        auto run = recentGroupRun(buildGroupWindowOrder(group.key), group.key);
                         for (int i = run.size() - 1; i >= 0; --i) {
                             HWND sib = run.at(i);
                             if (sib != targetHwnd && !IsIconic(sib)) {
@@ -387,12 +383,12 @@ void Widget::keyReleaseEvent(QKeyEvent* event) {
                                 // Only the target gets a real OS focus event below; without logging the
                                 // raised siblings too, a later tab-away-and-back would see them as stale
                                 // and collapse the run to a single window. Re-log the cluster contiguously.
-                                recordFocusEvent(group.exePath, sib);
+                                recordFocusEvent(group.key, sib);
                             }
                         }
-                        recordFocusEvent(group.exePath, targetHwnd); // target is newest in the cluster
+                        recordFocusEvent(group.key, targetHwnd); // target is newest in the cluster
                         Util::switchToWindow(targetHwnd);
-                        qInfo() << "Switch to" << targetHwnd << group.exePath;
+                        qInfo() << "Switch to" << targetHwnd << group.key;
                     }
                 }
             }
@@ -411,25 +407,11 @@ void Widget::paintEvent(QPaintEvent*) { //不绘制会导致鼠标穿透背景
     painter.drawRect(rect());
 }
 
+/// Windows already tells us which taskbar button a window belongs to, which is what separates
+/// Chrome/Edge profiles and PWAs sharing one browser process. Apps without one group by exe.
 QString Widget::getWindowGroupKey(HWND hwnd) {
-    auto path = Util::getWindowProcessPath(hwnd);
-    if (path.isEmpty()) return path;
-    
-    // Separate Chrome / Edge PWAs from normal browser windows
-    if (path.endsWith("chrome.exe", Qt::CaseInsensitive) || path.endsWith("msedge.exe", Qt::CaseInsensitive)) {
-        QString windowTitle = Util::getWindowTitle(hwnd);
-        if (!windowTitle.isEmpty() && 
-            !windowTitle.endsWith("- Google Chrome", Qt::CaseInsensitive) && 
-            !windowTitle.endsWith("- Google Chrome Beta", Qt::CaseInsensitive) && 
-            !windowTitle.endsWith("- Google Chrome Dev", Qt::CaseInsensitive) && 
-            !windowTitle.endsWith("- Google Chrome Canary", Qt::CaseInsensitive) &&
-            !windowTitle.endsWith("Microsoft\u200B Edge", Qt::CaseInsensitive) && 
-            !windowTitle.endsWith("Microsoft Edge", Qt::CaseInsensitive)) {
-            // It's a PWA. Group it by its process + window title
-            return "pwa:" + path + ":" + windowTitle;
-        }
-    }
-    return path;
+    if (auto appId = Util::getWindowAppId(hwnd); !appId.isEmpty()) return appId;
+    return Util::getWindowProcessPath(hwnd);
 }
 
 /// Record `hwnd` (and its group) as active at `now`, promoting the whole app near the top of MRU.
@@ -519,25 +501,38 @@ QList<WindowGroup> Widget::prepareWindowGroupList() {
         auto groupKey = getWindowGroupKey(hwnd);
         if (groupKey.isEmpty()) continue; // TODO 可能需要管理员权限
         auto& winGroup = winGroupMap[groupKey];
-        if (winGroup.exePath.isEmpty()) { // QIcon::isNull 判断可能不太准（例如空图标）
-            winGroup.exePath = groupKey;
-            
-            if (groupKey.startsWith("pwa:")) {
-                // Use the specific window icon (favicon) directly for PWAs
-                winGroup.icon = QIcon(Util::getWindowIcon(hwnd));
-            } else {
-                auto icon = Util::getCachedIcon(groupKey, hwnd); // TODO background thread
-                if (groupKey.endsWith("QQ\\bin\\QQ.exe", Qt::CaseInsensitive)) { // draw chat partner for classical QQ
-                    QPixmap overlay = Util::getWindowIcon(hwnd);
-                    const auto iSize = lw->iconSize();
-                    QPixmap bgPixmap = icon.pixmap(iSize);
-                    icon = Util::overlayIcon(bgPixmap, overlay, {{iSize.width() / 2, iSize.height() / 2}, iSize / 2});
-                }
-                winGroup.icon = icon;
-            }
+        if (winGroup.key.isEmpty()) {
+            winGroup.key = groupKey;
+            winGroup.exePath = Util::getWindowProcessPath(hwnd);
+            winGroup.name = Util::getWindowAppName(hwnd);
+            winGroup.icon = Util::getResourceIcon(Util::getWindowAppIconResource(hwnd)); // e.g. per-profile Chrome icon
         }
         winGroup.addWindow({Util::getWindowTitle(hwnd), Util::getClassName(hwnd), hwnd});
     }
+
+    QHash<QString, int> identitiesPerExe;
+    for (auto& group: winGroupMap)
+        identitiesPerExe[group.exePath.toLower()]++;
+
+    for (auto& group: winGroupMap) {
+        if (!group.icon.isNull()) continue;
+        HWND hwnd = group.windows.first().hwnd;
+        if (identitiesPerExe.value(group.exePath.toLower()) > 1) {
+            // One exe behind several taskbar buttons (PWAs): its icon can't tell them apart, so use the window's own
+            group.icon = QIcon(Util::getWindowIcon(hwnd));
+            if (group.name.isEmpty()) group.name = group.windows.first().title;
+            continue;
+        }
+        auto icon = Util::getCachedIcon(group.exePath, hwnd); // TODO background thread
+        if (group.exePath.endsWith("QQ\\bin\\QQ.exe", Qt::CaseInsensitive)) { // draw chat partner for classical QQ
+            QPixmap overlay = Util::getWindowIcon(hwnd);
+            const auto iSize = lw->iconSize();
+            QPixmap bgPixmap = icon.pixmap(iSize);
+            icon = Util::overlayIcon(bgPixmap, overlay, {{iSize.width() / 2, iSize.height() / 2}, iSize / 2});
+        }
+        group.icon = icon;
+    }
+
     auto winGroupList = winGroupMap.values();
     // 按照活跃度排序
     std::sort(winGroupList.begin(), winGroupList.end(), [this](const WindowGroup& a, const WindowGroup& b) {
@@ -563,10 +558,6 @@ bool Widget::prepareListWidget(bool selectCurrentApp) {
 
     // calculate Geometry
     if (auto firstItem = lw->item(0)) {
-        auto firstRect = lw->visualItemRect(firstItem);
-        auto width = lw->gridSize().width() * lw->count() + (firstRect.x() - lw->frameWidth()); // 一些微小的噼里啪啦修正
-        lw->setFixedWidth(width);
-
         // get screen
         bool displayOnPrimary = (cfg.getDisplayMonitor() == PrimaryMonitor);
         auto screen = displayOnPrimary ?
@@ -581,6 +572,15 @@ bool Widget::prepareListWidget(bool selectCurrentApp) {
             sysTray.showMessage("Error", "Screen nullptr!");
             return false;
         }
+
+        // wrap the icons into as many rows as needed to stay inside the screen
+        const auto grid = lw->gridSize();
+        const int pad = lw->visualItemRect(firstItem).x() - lw->frameWidth(); // 一些微小的噼里啪啦修正
+        const int maxWidth = screen->availableGeometry().width() - ListWidgetMargin.left() - ListWidgetMargin.right();
+        const int columns = qBound(1, (maxWidth - pad) / grid.width(), lw->count());
+        lw->setFixedWidth(grid.width() * columns + pad);
+        lw->doItemsLayout(); // so the row count below reflects the new width
+        lw->setFixedHeight(lw->visualItemRect(lw->item(lw->count() - 1)).bottom() + 1 + pad);
 
         // move to scrren center
         qDebug() << "Screen:" << screen->name();
@@ -669,8 +669,8 @@ bool Widget::requestShowForCurrentApp() {
 }
 
 /// Warning: the `HWND` not guarantee to be valid (may be closed)
-auto Widget::getLastActiveGroupWindow(const QString& exePath) -> QPair<HWND, QDateTime> {
-    auto hwndOrder = winActiveOrder.value(exePath);
+auto Widget::getLastActiveGroupWindow(const QString& groupKey) -> QPair<HWND, QDateTime> {
+    auto hwndOrder = winActiveOrder.value(groupKey);
     if (hwndOrder.isEmpty()) return {nullptr, QDateTime()};
     // QHash & QMap deref to value(QDateTime) rather than QPair
     auto iter = std::max_element(hwndOrder.begin(), hwndOrder.end());
@@ -679,12 +679,12 @@ auto Widget::getLastActiveGroupWindow(const QString& exePath) -> QPair<HWND, QDa
 
 /// return null if no window recorded in group
 auto Widget::getLastValidActiveGroupWindow(const WindowGroup& group) -> QPair<HWND, QDateTime> {
-    auto hwndOrder = winActiveOrder.value(group.exePath);
+    auto hwndOrder = winActiveOrder.value(group.key);
 
     QList<HWND> windows;
     for (auto& info: group.windows)
         windows << info.hwnd;
-    sortGroupWindows(windows, group.exePath);
+    sortGroupWindows(windows, group.key);
 
     if (!hwndOrder.isEmpty()) {
         if (auto time = hwndOrder.value(windows.first()); !time.isNull())
@@ -692,9 +692,8 @@ auto Widget::getLastValidActiveGroupWindow(const WindowGroup& group) -> QPair<HW
     }
 
     // Fallback: search hwndActiveTime directly by HWND.
-    // Handles two cases:
-    //   1. PWA (e.g. Gemini): window title changes → groupKey changes → winActiveOrder misses it
-    //   2. UWP on first launch: getAppCoreWindow() fails initially → groupKey was never recorded
+    // Handles a window whose groupKey was never recorded, e.g. UWP on first launch when
+    // getAppCoreWindow() still fails.
     HWND bestHwnd = nullptr;
     QDateTime bestTime;
     for (auto& info : group.windows) {
@@ -707,9 +706,9 @@ auto Widget::getLastValidActiveGroupWindow(const WindowGroup& group) -> QPair<HW
     return {bestHwnd, bestTime};
 }
 
-/// sort Windows of [Group specified by exePath], by active order (latest first)
-void Widget::sortGroupWindows(QList<HWND>& windows, const QString& exePath) {
-    auto activeOrdMap = winActiveOrder.value(exePath);
+/// sort Windows of [Group specified by groupKey], by active order (latest first)
+void Widget::sortGroupWindows(QList<HWND>& windows, const QString& groupKey) {
+    auto activeOrdMap = winActiveOrder.value(groupKey);
     // sort by active order, falling back to hwndActiveTime when groupKey-based entry is missing
     std::sort(windows.begin(), windows.end(), [&](HWND a, HWND b) {
         bool aMin = IsIconic(a);
@@ -766,7 +765,7 @@ QList<HWND> Widget::recentGroupRun(const QList<HWND>& siblings, const QString& g
     return run;
 }
 
-/// group by exePath/groupKey, sort by active order (last active first)
+/// group by groupKey, sort by active order (last active first)
 QList<HWND> Widget::buildGroupWindowOrder(const QString& groupKey) {
     QList<HWND> windows;
     auto allWindows = Util::listValidWindows();
@@ -796,7 +795,7 @@ bool Widget::eventFilter(QObject* watched, QEvent* event) {
                 hwnd = nullptr;
                 groupWindowOrder.clear();
             }
-            auto targetExe = windowGroup.exePath;
+            auto targetExe = windowGroup.key;
             static bool isLastRollUp = true;
             bool isRollUp = wheelEvent->angleDelta().x() > 0; // ListWidget的方向改成了从左到右，所以滚轮方向从y()变成x()了
             if (groupWindowOrder.isEmpty())
@@ -833,22 +832,26 @@ bool Widget::eventFilter(QObject* watched, QEvent* event) {
 }
 
 /// `forward`: true for restore, false for minimize
-void Widget::rotateTaskbarWindowInGroup(const QString& exePath, bool forward, int windows) {
-    qDebug() << "(Taskbar)Wheel on:" << exePath << forward << windows;
-    if (exePath.isEmpty()) return;
+void Widget::rotateTaskbarWindowInGroup(const QString& appId, const QString& exePath, bool forward, int windows) {
+    qDebug() << "(Taskbar)Wheel on:" << appId << exePath << forward << windows;
+    if (exePath.isEmpty() && appId.isEmpty()) return;
     if (!windows) { // 程序没有打开的窗口，处于关闭状态; 若不拦截，可能造成错误窗口被触发：explorer.exe -> msedge.exe
         qDebug() << "No window for this app";
         return;
     }
 
-    static QString lastPath;
+    // The taskbar button's appId is the same identity the windows are stamped with, so it selects
+    // the right Chrome profile / PWA; apps whose windows carry none are still grouped by exe.
+    static QString lastKey;
     static HWND lastHwnd = nullptr;
-    if (lastPath != exePath) {
-        lastPath = exePath;
+    if (lastKey != appId + exePath) {
+        lastKey = appId + exePath;
         groupWindowOrder.clear();
     }
     if (groupWindowOrder.isEmpty()) {
-        groupWindowOrder = buildGroupWindowOrder(exePath);
+        groupWindowOrder = buildGroupWindowOrder(appId);
+        if (groupWindowOrder.isEmpty())
+            groupWindowOrder = buildGroupWindowOrder(exePath);
         lastHwnd = nullptr;
     }
 
