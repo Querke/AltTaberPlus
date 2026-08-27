@@ -317,6 +317,20 @@ namespace Util {
         LockSetForegroundWindow(LSFW_UNLOCK);
     }
 
+    /// Floating always-on-top overlay bars (Teams "sharing control bar" / "meeting compact view"):
+    /// pinned on top, not resizable, and not filling the monitor. A real always-on-top app window is
+    /// resizable, and a fullscreen game covers its monitor.
+    static bool isOverlayWindow(HWND hwnd, LONG style, LONG exStyle) {
+        if (!(exStyle & WS_EX_TOPMOST) || (style & WS_THICKFRAME)) return false;
+
+        MONITORINFO monitor = {sizeof(MONITORINFO)};
+        RECT rect;
+        if (!GetWindowRect(hwnd, &rect) || !GetMonitorInfo(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor))
+            return false;
+        return (rect.right - rect.left) < (monitor.rcMonitor.right - monitor.rcMonitor.left)
+               || (rect.bottom - rect.top) < (monitor.rcMonitor.bottom - monitor.rcMonitor.top);
+    }
+
     /// filter HWND by some rules
     /// @param skipVisibleCheck skip IsWindowVisible check<br>
     /// 在窗口创建过程中，会触发 EVENT_SYSTEM_FOREGROUND，但是这瞬间 IsWindowVisible 为false
@@ -337,6 +351,7 @@ namespace Util {
             "QQ Follower.exe"
         };
         LONG exStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
+        LONG style = GetWindowLong(hwnd, GWL_STYLE);
         QString className = getClassName(hwnd);
 
         if ((skipVisibleCheck || IsWindowVisible(hwnd))
@@ -344,7 +359,7 @@ namespace Util {
             // 窗口显示在任务栏的基本规则：https://devblogs.microsoft.com/oldnewthing/20031229-00/?p=41283
             && (!GetWindow(hwnd, GW_OWNER) || (exStyle & WS_EX_APPWINDOW) || className == "#32770") // OmApSvcBroker, QQ主面板（意料之外）; 保留：系统属性（Path）; #32770 = standard dialog (e.g. "Problem with Shortcut")
             && (exStyle & WS_EX_TOOLWINDOW) == 0 // 非工具窗口，但其实有些工具窗口没有这个这个属性
-            //            && (exStyle & WS_EX_TOPMOST) == 0 // 非置顶窗口
+            && !isOverlayWindow(hwnd, style, exStyle)
             && GetWindowTextLength(hwnd) > 0
             && className.size() > 0
             && !BlackList_ClassName.contains(className)
