@@ -5,33 +5,39 @@
 void IconOnlyDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const {
     painter->setRenderHint(QPainter::Antialiasing);
     painter->setPen(Qt::NoPen); //取消边框
-    // option.rect.size() == QListWidgetItem::sizeHint()
+    // option.rect.size() == QListWidgetItem::sizeHint(); its square top is the icon slot, the band
+    // below it is reserved for the app name label drawn by Widget
+    const QRect cell(option.rect.topLeft(), QSize(option.rect.width(), option.rect.width()));
     if (option.state & QStyle::State_Selected) {
         QPainterPath path;
-        path.addRoundedRect(option.rect, radius, radius);
+        path.addRoundedRect(cell, radius, radius);
         painter->setBrush(selectedColor);
         painter->drawPath(path);
 
-        // light inner shadow: strokes are clipped to the path, leaving only their inner half
+        // inner shadow: 1px-stepped outlines shrinking inward, alpha falling off quadratically,
+        // clipped to the path so the corners stay rounded
+        constexpr int blur = 10;
+        constexpr int strength = 15;
         painter->save();
         painter->setClipPath(path);
         painter->setBrush(Qt::NoBrush);
-        for (int i = 0; i < 5; ++i) {
-            painter->setPen(QPen(QColor(255, 255, 255, 45 - i * 8), 2 + i * 2));
-            painter->drawPath(path);
+        for (int i = 0; i < blur; ++i) {
+            const qreal falloff = 1.0 - qreal(i) / blur;
+            painter->setPen(QPen(QColor(0, 0, 0, int(strength * falloff * falloff)), 2));
+            painter->drawRoundedRect(QRectF(cell).adjusted(i, i, -i, -i), radius, radius);
         }
         painter->restore();
         painter->setPen(Qt::NoPen);
     } else if (option.state & QStyle::State_MouseOver) {
         painter->setBrush(hoverColor);
-        painter->drawRoundedRect(option.rect, radius, radius);
+        painter->drawRoundedRect(cell, radius, radius);
     }
 
     // 居中绘制图标
     auto icon = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
     if (!icon.isNull()) {
         QRect iconRect{{}, option.decorationSize}; // QListWidget::iconSize()
-        iconRect.moveCenter(option.rect.center());
+        iconRect.moveCenter(cell.center());
         icon.paint(painter, iconRect);
     }
 
@@ -41,7 +47,7 @@ void IconOnlyDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opti
         auto text = QString::number(num);
         const auto extraWidth = 8 * (text.size() - 1);
         constexpr auto R = 12;
-        auto badgeCenter = option.rect.topRight() + QPoint(-(R + 3), R + 3);
+        auto badgeCenter = cell.topRight() + QPoint(-(R + 3), R + 3);
         // extra Width for extra number
         auto badgeRect = QRect(badgeCenter + QPoint(-R - extraWidth, -R), QSize(2 * R + extraWidth, 2 * R));
         painter->setPen(QColor(200, 200, 200, 50));

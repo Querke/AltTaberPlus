@@ -87,7 +87,8 @@ Widget::Widget(QWidget* parent) : QWidget(parent), ui(new Ui::Widget) {
     lw->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     lw->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     lw->setIconSize({64, 64});
-    lw->setGridSize({80, 80});
+    // cells are a square icon slot plus a band underneath for the app name, so rows never collide
+    lw->setGridSize({80, 80 + ui->label->fontMetrics().height() + 4});
     lw->setFixedHeight(lw->gridSize().height());
     lw->setUniformItemSizes(true); // optimization ?
     lw->setStyleSheet(R"(
@@ -236,8 +237,8 @@ void Widget::showLabelForItem(QListWidgetItem* item, QString text, HWND focusHwn
     ui->label->adjustSize();
 
     auto itemRect = lw->visualItemRect(item);
-    // below the whole grid, not just the item's row, so the label never covers the row underneath
-    auto center = QPoint(itemRect.center().x(), lw->height() + ListWidgetMargin.bottom() / 2);
+    // centered in the name band below the icon slot (the cell's square top part)
+    auto center = QPoint(itemRect.center().x(), (itemRect.top() + itemRect.width() + itemRect.bottom()) / 2);
     center = lw->mapTo(this, center);
     auto labelRect = ui->label->rect();
     labelRect.moveCenter(center);
@@ -557,7 +558,7 @@ bool Widget::prepareListWidget(bool selectCurrentApp) {
     }
 
     // calculate Geometry
-    if (auto firstItem = lw->item(0)) {
+    if (lw->item(0)) {
         // get screen
         bool displayOnPrimary = (cfg.getDisplayMonitor() == PrimaryMonitor);
         auto screen = displayOnPrimary ?
@@ -575,12 +576,15 @@ bool Widget::prepareListWidget(bool selectCurrentApp) {
 
         // wrap the icons into as many rows as needed to stay inside the screen
         const auto grid = lw->gridSize();
-        const int pad = lw->visualItemRect(firstItem).x() - lw->frameWidth(); // 一些微小的噼里啪啦修正
+        // items are laid out in the viewport, which is narrower than the widget by frame & margins;
+        // +2 because Qt wraps early when a row exactly fills the viewport
+        const int pad = lw->width() - lw->viewport()->width() + 2;
         const int maxWidth = screen->availableGeometry().width() - ListWidgetMargin.left() - ListWidgetMargin.right();
         const int columns = qBound(1, (maxWidth - pad) / grid.width(), lw->count());
         lw->setFixedWidth(grid.width() * columns + pad);
-        lw->doItemsLayout(); // so the row count below reflects the new width
-        lw->setFixedHeight(lw->visualItemRect(lw->item(lw->count() - 1)).bottom() + 1 + pad);
+        lw->doItemsLayout(); // so the height below reflects the real row count
+        // stop at the last row's icon slot: its name band would only be empty space at the bottom
+        lw->setFixedHeight(lw->visualItemRect(lw->item(lw->count() - 1)).top() + grid.width());
 
         // move to scrren center
         qDebug() << "Screen:" << screen->name();
