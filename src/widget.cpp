@@ -1,6 +1,7 @@
 #include "../header/widget.h"
 #include "ui_Widget.h"
 #include "utils/Util.h"
+#include "utils/AppUtil.h"
 #include <QDebug>
 #include <QWindow>
 #include <QScreen>
@@ -506,7 +507,10 @@ QList<WindowGroup> Widget::prepareWindowGroupList() {
             winGroup.key = groupKey;
             winGroup.exePath = Util::getWindowProcessPath(hwnd);
             winGroup.name = Util::getWindowAppName(hwnd);
-            winGroup.icon = Util::getResourceIcon(Util::getWindowAppIconResource(hwnd)); // e.g. per-profile Chrome icon
+            // the taskbar shortcut wins, so a hand-picked icon shows up here too
+            winGroup.icon = Util::getResourceIcon(AppUtil::getPinnedIconResource(groupKey, winGroup.exePath));
+            if (winGroup.icon.isNull())
+                winGroup.icon = Util::getResourceIcon(Util::getWindowAppIconResource(hwnd)); // e.g. per-profile Chrome icon
         }
         winGroup.addWindow({Util::getWindowTitle(hwnd), Util::getClassName(hwnd), hwnd});
     }

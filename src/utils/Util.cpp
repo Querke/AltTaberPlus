@@ -232,13 +232,15 @@ namespace Util {
         if (auto icon = IconCache.value(resource); !icon.isNull())
             return icon;
 
-        QString file = resource;
+        wchar_t expanded[MAX_PATH];
+        QString file = ExpandEnvironmentStringsW(resource.toStdWString().c_str(), expanded, MAX_PATH)
+                       ? QString::fromWCharArray(expanded) : resource; // shortcuts store paths like %SystemRoot%\...
         int index = 0;
-        if (auto comma = resource.lastIndexOf(','); comma > 0) {
+        if (auto comma = file.lastIndexOf(','); comma > 0) {
             bool isNumber = false;
-            if (int i = resource.mid(comma + 1).toInt(&isNumber); isNumber) {
+            if (int i = file.mid(comma + 1).toInt(&isNumber); isNumber) {
                 index = i;
-                file = resource.left(comma);
+                file = file.left(comma);
             }
         }
 
@@ -321,7 +323,8 @@ namespace Util {
     /// pinned on top, not resizable, and not filling the monitor. A real always-on-top app window is
     /// resizable, and a fullscreen game covers its monitor.
     static bool isOverlayWindow(HWND hwnd, LONG style, LONG exStyle) {
-        if (!(exStyle & WS_EX_TOPMOST) || (style & WS_THICKFRAME)) return false;
+        // a minimized window's rect is the off-screen placeholder, so the size test below is meaningless
+        if (!(exStyle & WS_EX_TOPMOST) || (style & (WS_THICKFRAME | WS_MINIMIZE))) return false;
 
         MONITORINFO monitor = {sizeof(MONITORINFO)};
         RECT rect;
@@ -491,48 +494,17 @@ namespace Util {
     // ExtractIconEx 最大返回32x32
     // IShellItemImageFactory::GetImage 获取的图像有锯齿（64x64），而256x256倒是好一点，但是若exe没有这么大的图标，缩放后还是会很小（中心）
     // SHGetFileInfo 获取的图标最大只能32x32, 但是可以通过Index + SHGetImageList获取更大的图标(Jumbo)，这就是QFileIconProvider的实现
-    // 没办法，对于不包含大图标的exe，周围会被填充透明，导致真实图标很小（例如，[Follower]获取64x64的图标，但只有左上角有8x8图标，其余透明）
-    // 更诡异的是，48x48的Icon，Follower是可以正常获取的，比64x64的实际Icon尺寸还要大，倒行逆施
-    // 但是我无法得知真实图标大小，无法进行缩放，只能作罢
-    QIcon getJumboIcon(const QString& filePath) {
-        SHFILEINFOW sfi = {nullptr};
-        // Get the icon index using SHGetFileInfo
-        SHGetFileInfo(filePath.toStdWString().c_str(), 0, &sfi, sizeof(SHFILEINFOW), SHGFI_SYSICONINDEX);
-
-        // 48x48 icons, use SHIL_EXTRALARGE
-        // 256x256 icons (after Vista), use SHIL_JUMBO
-        IImageList* imageList;
-        HRESULT hResult = SHGetImageList(SHIL_JUMBO, IID_IImageList, (void**) &imageList);
-
-        QIcon icon;
-        if (hResult == S_OK) {
-            HICON hIcon;
-            hResult = imageList->GetIcon(sfi.iIcon, ILD_TRANSPARENT, &hIcon);
-
-            if (hResult == S_OK) {
-                icon = QtWin::fromHICON(hIcon);
-                DestroyIcon(sfi.hIcon);
-            }
+    /// Icon of an exe, rendered at `size`. The shell's jumbo image-list entry can't be used: for an exe
+    /// that only ships small icons it returns a large canvas with the icon sitting in the top-left corner.
+    QIcon getExeIcon(const QString& filePath, int size) {
+        HICON hIcon = nullptr;
+        UINT id = 0;
+        if (PrivateExtractIcons(filePath.toStdWString().c_str(), 0, size, size, &hIcon, &id, 1, 0) && hIcon) {
+            QIcon icon(QtWin::fromHICON(hIcon));
+            DestroyIcon(hIcon);
+            return icon;
         }
-        imageList->Release();
-        return icon;
-    }
-
-    bool isBottomRightTransparent(const QIcon& icon, int extent = 32) {
-        // 8 16 32 64貌似时间都差不多 怪
-        QImage image = icon.pixmap(extent).toImage().convertToFormat(QImage::Format_ARGB32); // 强制转换为支持透明的格式
-
-        int width = image.width();
-        int height = image.height();
-
-        // 遍历右下角 1/4 区域
-        for (int y = height / 2; y < height; ++y) {
-            for (int x = width / 2; x < width; ++x) {
-                if (qAlpha(image.pixel(x, y)) != 0) // 检查 Alpha 通道是否为 0
-                    return false;
-            }
-        }
-        return true;
+        return {};
     }
 
     /// 通过窗口句柄获取UWP安装目录，如果该窗口不是UWP应用，则返回""
@@ -600,11 +572,9 @@ namespace Util {
             qDebug() << "Detect UWP" << path;
             icon = AppUtil::getAppIcon(uwpDir + "\\fake.exe");
         } else { // win32 desktop app
-            icon = getJumboIcon(path);
-            if (isBottomRightTransparent(icon)) {
-                // 对于不包含大图标的exe，例如[Follower]获取64x64的图标，但只有左上角有8x8图标，其余透明）
-                // 通过检测右下角1/4区域来判定这种小图标情况，改为获取小号size图标，则会正常（如48x48）（也许需要向下遍历，但是一般情况下够用了）
-                qDebug() << "-- BottomRight is transparent, fallback to 48x48" << path;
+            icon = getExeIcon(path, 256);
+            if (icon.isNull()) {
+                qWarning() << "-- No icon in exe, fallback to shell default" << path;
                 icon = QFileIconProvider().icon(QFileInfo(path)).pixmap(48);
             }
         }

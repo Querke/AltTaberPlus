@@ -27,7 +27,7 @@ namespace Util {
     QList<HWND> listValidWindows();
     QList<HWND> listValidWindows(const QString& exePath);
     QList<HWND> findTopWindows(const QString& className, const QString& title = QString());
-    QIcon getJumboIcon(const QString& filePath);
+    QIcon getExeIcon(const QString& filePath, int size);
     QIcon getCachedIcon(const QString& path, HWND hwnd);
     QPixmap getWindowIcon(HWND hwnd);
     bool setWindowRoundCorner(HWND hwnd, DWM_WINDOW_CORNER_PREFERENCE pvAttribute = DWMWCP_ROUND);

@@ -313,6 +313,47 @@ namespace AppUtil {
     /// 还有更奇怪的，Clash for Windows, 在getStartAppList()中的AppID是绝对路径，但是AutoAnimation获取的是"com.lbyczf.clashwin"对不上. Steam, Dingdingも<br>
     /// So: 如果AppID无匹配，则转向Name匹配<br>
     /// Name也分为多种情况：若app加入StartMenu，则有优先使用该名称（快捷方式）(e.g. Follower)；否则使用文件描述
+    /// Icon resource ("file,index") of the taskbar shortcut for an app, so the list matches what the
+    /// taskbar draws, including icons the user replaced by hand. Keyed by AppUserModelId and by target
+    /// exe, since only pinned apps carry an id.
+    QString getPinnedIconResource(const QString& appId, const QString& exePath) {
+        static QHash<QString, QString> pinned2Icon;
+        static bool built = false;
+        if (!built) {
+            built = true;
+            const QString dir = QDir::homePath() +
+                                "/AppData/Roaming/Microsoft/Internet Explorer/Quick Launch/User Pinned/TaskBar";
+            for (const auto& entry: QDir(dir).entryInfoList({"*.lnk"}, QDir::Files)) {
+                CComPtr<IShellLinkW> link;
+                if (FAILED(link.CoCreateInstance(CLSID_ShellLink))) continue;
+                CComQIPtr<IPersistFile> file(link);
+                if (!file || FAILED(file->Load(entry.absoluteFilePath().toStdWString().c_str(), STGM_READ))) continue;
+
+                wchar_t iconFile[MAX_PATH] = {0};
+                int iconIndex = 0;
+                if (FAILED(link->GetIconLocation(iconFile, MAX_PATH, &iconIndex)) || !iconFile[0])
+                    continue; // no icon of its own, the target's icon is what we would use anyway
+                const auto resource = QString::fromWCharArray(iconFile) + ',' + QString::number(iconIndex);
+
+                CComQIPtr<IPropertyStore> store(link);
+                if (store) {
+                    PROPVARIANT var;
+                    PropVariantInit(&var);
+                    if (SUCCEEDED(store->GetValue(PKEY_AppUserModel_ID, &var)) && var.vt == VT_LPWSTR)
+                        pinned2Icon.insert(QString::fromWCharArray(var.pwszVal), resource);
+                    PropVariantClear(&var);
+                }
+                wchar_t target[MAX_PATH] = {0};
+                if (SUCCEEDED(link->GetPath(target, MAX_PATH, nullptr, 0)) && target[0])
+                    pinned2Icon.insert(QString::fromWCharArray(target).toLower(), resource);
+            }
+            qDebug() << "Pinned taskbar icons:" << pinned2Icon.size();
+        }
+
+        if (auto icon = pinned2Icon.value(appId); !icon.isEmpty()) return icon;
+        return pinned2Icon.value(exePath.toLower());
+    }
+
     QString getExePathFromAppIdOrName(const QString& appid, const QString& appName) {
         static QHash<QString, QString> app2Path; // appid or name
         static QHash<QString, QString> desc2Path; // description
